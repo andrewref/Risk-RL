@@ -1,0 +1,4 @@
+# pyrisk/pyproject.toml  – minimal editable install
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

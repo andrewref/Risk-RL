@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+ai/__init__.py
+ai/al.py
+ai/better.py
+ai/chron.py
+ai/stupid.py
+ai.egg-info/PKG-INFO
+ai.egg-info/SOURCES.txt
+ai.egg-info/dependency_links.txt
+ai.egg-info/top_level.txt
