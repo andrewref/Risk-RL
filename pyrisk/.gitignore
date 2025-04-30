@@ -1,2 +1,21 @@
+
+---
+
+# ✅ 2. `.gitignore`
+
+Save this as `.gitignore` in the root of your project:
+
+```gitignore
+__pycache__/
 *.pyc
-*~
+*.pyo
+*.pyd
+*.zip
+*.log
+checkpoints_multi/
+saved_models/
+.vscode/
+.idea/
+.env/
+.DS_Store
+*.egg-info/
