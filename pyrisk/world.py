@@ -188,3 +188,5 @@ class World:
 
     def get_map(self):             return get_map()
     def last_event(self):          return last_event()
+MAP = CONNECT
+KEY = {}
