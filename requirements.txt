@@ -1,0 +1,7 @@
+gym
+numpy
+stable-baselines3
+matplotlib
+tqdm
+pygame
+windows-curses; sys_platform == 'win32'
