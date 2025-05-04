@@ -1,147 +1,124 @@
 # ai/random_ai.py
 """
-A purely‑random (yet rules‑respecting) Risk bot.
+RandomAI‑v2 – retains unpredictability but avoids reckless plays.
 
-Strategy (such as it is):
-1.  **Initial claim / reinforcement** – pick territories at random.
-2.  **Reinforce** – dump all troops on a random owned territory
-    (50 % chance to choose a border, 50 % chance anywhere).
-3.  **Attack** – keep picking random legal attacks while
-    - attacker has ≥ 3 troops, and
-    - a coin‑flip (50 %) says “keep going”.
-    For each win we move the minimum (Risk rules) or a random legal count.
-4.  **Freemove** – 30 % chance to move surplus troops from a random
-    rear territory to a random friendly neighbour.
-
-Because it’s unpredictable it can still surprise smarter agents and give
-your PPO learner useful variety.
+Keeps the “coin‑flip” flavour yet biases toward:
+▪ safer initial claims,
+▪ reinforcing borders more often,
+▪ only attacking when odds ≥ 50 %,
+▪ up to 4 conquests per turn,
+▪ smarter freemove toward weakest border.
 """
 
 import random
 from typing import List, Tuple
 
 class RandomAI:
-    # ------------------------------------------------------------------ #
-    #  Mandatory constructor                                             #
-    # ------------------------------------------------------------------ #
     def __init__(self, player, game, world, **kwargs):
-        self.player   = player
-        self.game     = game
-        self.world    = world
-        self.rng      = random.Random()          # private RNG
+        self.player = player
+        self.game   = game
+        self.world  = world
+        self.rng    = random.Random()
 
-    # ------------------------------------------------------------------ #
-    #  Lifecycle hooks (optional bookkeeping – unused here)              #
-    # ------------------------------------------------------------------ #
+    # ------------- lifecycle stubs ------------------------------------ #
     def start(self):  pass
     def end(self):    pass
     def event(self, msg): pass
 
-    # ------------------------------------------------------------------ #
-# ai/random_ai.py  ── fix for initial_placement  ------------------------
-
+    # ------------- initial placement ---------------------------------- #
     def initial_placement(self, empty_list, remaining):
-        """
-        During the claiming phase we pick from `empty_list`.
-        Once every territory is owned (empty_list is None) we place extra
-        troops on a random territory we already own.
-        """
-        if empty_list:                         # still claiming
-            pick = self.rng.choice(empty_list)
-        else:                                  # reinforcing
-            terrs = list(self.player.territories)   # ← convert generator ➜ list
+        if empty_list:
+            if self.rng.random() < 0.7:
+                # 70 % choose lowest‑degree unclaimed territory
+                pick = min(empty_list, key=lambda t: len(t.connect))
+            else:
+                pick = self.rng.choice(empty_list)
+        else:
+            terrs = list(self.player.territories)
             pick  = self.rng.choice(terrs)
         return pick.name
 
-   # ai/random_ai.py  ── patched reinforce()  -----------------------------
-
+    # ------------- reinforce ------------------------------------------ #
     def reinforce(self, troops: int):
-        """
-        Put all reinforcements on one random owned territory.
-        50 % chance to prefer a border; otherwise anywhere.
-        """
-        terrs = list(self.player.territories)                 # ← NEW
-        borders = [t for t in terrs                           # ← CHANGED
+        terrs   = list(self.player.territories)
+        borders = [t for t in terrs
                    if any(n.owner and n.owner != self.player for n in t.connect)]
-
-        if borders and self.rng.random() < 0.5:
+        if borders and self.rng.random() < 0.8:      # 80 % bias
             target = self.rng.choice(borders)
         else:
             target = self.rng.choice(terrs)
         return {target.name: troops}
 
-
-    # ------------------------------------------------------------------ #
-    #  Attack                                                            #
-    # ------------------------------------------------------------------ #
+    # ------------- attack --------------------------------------------- #
     def attack(self) -> List[Tuple[str, str, callable, callable]]:
-        """
-        Returns a list of (src, tgt, continue_fn, move_fn) orders.
-        We keep issuing random legal attacks until:
-          • no more legal attacks, or
-          • 50 % coin‑flip tells us to stop.
-        """
-        orders = []
+        orders    = []
+        conquest  = 0
+        max_cons  = 4
 
-        # helper to find all current legal attacks
-        def legal_attacks():
+        # helper: all “reasonable” attacks
+        def candidate_attacks():
             for src in self.player.territories:
-                if src.forces < 3:            # Risk needs ≥3 to attack (keep 1)
+                if src.forces < 3:              # need 2 dice + 1 stay
                     continue
                 for tgt in src.adjacent(friendly=False):
-                    yield (src, tgt)
+                    if (src.forces - 1) >= tgt.forces + 1:  # odds ≥ ~50 %
+                        yield src, tgt
 
-        while True:
-            attacks = list(legal_attacks())
-            if not attacks or self.rng.random() < 0.5:
+        while conquest < max_cons:
+            cand = [p for p in candidate_attacks()]
+            if not cand or self.rng.random() < 0.5:
                 break
-
-            src, tgt = self.rng.choice(attacks)
+            # random among top‑N (N= min(5, len(cand)))
+            cand.sort(key=lambda st: (st[0].forces - 1) / st[1].forces,
+                       reverse=True)
+            topN = cand[:max(1, min(5, len(cand)))]
+            src, tgt = self.rng.choice(topN)
 
             def continue_fn(n_atk, n_def):
-                # stop after this battle (single round) 50 % of the time
-                return self.rng.random() < 0.5 and n_atk > 1
+                # 40 % chance to keep rolling if still have troops >1
+                return self.rng.random() < 0.4 and n_atk > 1
 
             def move_fn(n_atk):
-                """
-                Risk rules: must leave at least 1 behind in source and move
-                1‑3 (or all‑1) troops into conquered territory.
-                """
                 max_move = min(3, n_atk - 1)
+                # 60 % pick half, else min rule
+                if self.rng.random() < 0.6 and n_atk > 6:
+                    return max(n_atk // 2, 3)
                 return self.rng.randint(1, max_move)
 
             orders.append((src.name, tgt.name, continue_fn, move_fn))
+            conquest += 1
 
-            # Pretend the attack succeeded so we don’t endlessly pick same pair
-            tgt.owner = self.player
-            moved = move_fn(src.forces)
+            # optimistic update so we don't re‑pick same tgt
+            tgt.owner  = self.player
+            moved      = move_fn(src.forces)
             tgt.forces = moved
             src.forces -= moved
 
         return orders
 
-    # ------------------------------------------------------------------ #
-    #  Free‑move stage                                                   #
-    # ------------------------------------------------------------------ #
+    # ------------- freemove ------------------------------------------- #
     def freemove(self):
-        """
-        30 % chance to move all but one troop from a random ‘rear’ territory
-        (no adjacent enemies) to a random friendly neighbour.
-        Return (src_name, tgt_name, troops) or None.
-        """
-        if self.rng.random() >= 0.3:
+        if self.rng.random() >= 0.5:     # 50 % chance to freemove
             return None
 
-        rears = [t for t in self.player.territories
+        terrs = list(self.player.territories)
+        rears = [t for t in terrs
                  if t.forces > 1 and
                     all(n.owner == self.player for n in t.connect)]
         if not rears:
             return None
-
         src = self.rng.choice(rears)
-        friends = [n for n in src.connect if n.owner == self.player]
-        if not friends:
-            return None
-        tgt = self.rng.choice(friends)
+
+        # choose destination
+        borders = [t for t in terrs
+                   if any(n.owner and n.owner != self.player for n in t.connect)]
+        if borders and self.rng.random() < 0.7:
+            tgt = self.rng.choice(borders)
+        else:
+            friends = [n for n in src.connect if n.owner == self.player]
+            if not friends:
+                return None
+            tgt = self.rng.choice(friends)
+
         move = src.forces - 1
         return (src.name, tgt.name, move)
