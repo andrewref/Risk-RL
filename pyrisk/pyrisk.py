@@ -7,9 +7,11 @@ import re
 import collections
 import curses
 from game import Game
+import sys
+import os
 
 from world import CONNECT, MAP, KEY, AREAS
-
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 LOG = logging.getLogger("pyrisk")
 import argparse
 
@@ -52,7 +54,7 @@ for p in args.players:
         else:
             count = 1
         try:
-            klass = getattr(importlib.import_module("ai."+package), name)
+            klass = getattr(importlib.import_module("agents."+package), name)
             for i in range(count):
                 player_classes.append(klass)
         except:
@@ -85,4 +87,8 @@ else:
     print("Outcome of %s games" % args.games)
     for k in sorted(wins, key=lambda x: wins[x]):
         print("%s [%s]:\t%s" % (k, player_classes[NAMES.index(k)].__name__, wins[k]))
+for name, t in self.game.world.territories.items():
+    if name not in self.t_centre:      # ← skip territories with no coords
+        continue
+
 
