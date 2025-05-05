@@ -1,11 +1,9 @@
-from display import Display, CursesDisplay
-from player import Player
-from territory import World
-from world import CONNECT, AREAS, MAP, KEY
+from pyrisk.display import Display, CursesDisplay
+from pyrisk.player   import Player     
+from pyrisk.territory import World
+from pyrisk.world import CONNECT, AREAS, MAP, KEY
 import logging
 LOG = logging.getLogger("pyrisk")
-import random
-
 
 
 class Game(object):
