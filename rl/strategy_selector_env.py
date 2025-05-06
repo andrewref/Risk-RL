@@ -19,7 +19,8 @@ from gym import spaces
 import random
 
 from rl.env import RiskEnv, HARD_STRATS, STRAT_NAMES
-from pyrisk.world import _TERRITORIES  # type: ignore
+from rl.env import RiskEnv, HARD_STRATS, STRAT_NAMES, _TERRITORIES  # ✅ correct and safe
+
 
 NUM_STRATS     = len(HARD_STRATS)     # 4
 SEGMENT_TURNS  = 7                    # play 7 turns per episode

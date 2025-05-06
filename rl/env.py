@@ -119,19 +119,19 @@ class RiskEnv(gym.Env):
         self.game.add_player("CHARLIE", BalancedAI)
         self.game.add_player("DELTA", DefensiveAI)
 
-        # auto placement (safe fallback)
+                # initial placement (random deal)
         if hasattr(self.game, "initial_placement_auto"):
-            self.game.initial_placement_auto()
-        else:  # basic manual claim if auto not present
-            for terr in _TERRITORIES:
-                self.game.world._OWNER[terr]  = 0  # all to ALPHA to avoid errors
-                self.game.world._TROOPS[terr] = 1
+            try:
+                self.game.initial_placement_auto()
+            except Exception as e:
+                warnings.warn(f"initial_placement_auto failed: {e}")
+        # else: assume world_reset handled territory assignment
 
         self.current_step       = 0
         self.start_strategy_idx = 0
         self._cached_owned      = len(self.game.world.my_territories())
         self._reinforcements    = getattr(self.game.current_player, "reinforcements", 3)
-        return self._get_obs(), {}
+        return self._get_obs(), {}(), {}(), {}
 
     # ---------------------------------------------------------------- #
     def step(self, action: int):
