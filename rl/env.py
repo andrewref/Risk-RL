@@ -1,4 +1,4 @@
-"""rl/env.py – full Risk game environment for ALPHA (seat 0)
+"""rl/env.py – full Risk game environment for ALPHA (seat 0)
 
 ▪ Spawns a new PyRisk game with three hard‑coded opponents.
 ▪ Allows a PPO agent to (optionally) pick an opening strategy for the
@@ -72,13 +72,52 @@ NUM_TERR                 = len(_TERRITORIES)
 MAX_TROOPS               = 20
 BOOTSTRAP_TURNS          = 3
 
+# Create a placeholder Human AI class for the ALPHA player
+class HumanControlledAI:
+    def __init__(self, player, game, world, **kwargs):
+        self.player = player
+        self.game = game
+        self.world = world
+        
+    def reinforce(self):
+        # Will be controlled by the RL agent
+        return None
+        
+    def attack(self):
+        # Will be controlled by the RL agent
+        return None
+        
+    def freemove(self):
+        # Will be controlled by the RL agent
+        return None
+
 # ------------------------------------------------------------------- #
 #  Activate helper monkey‑patches (play_turn_with_strategy etc.)       #
 # ------------------------------------------------------------------- #
 import rl.strategies  # noqa: F401  (import solely for side‑effects)
 
 # ------------------------------------------------------------------- #
-# 3.  Gym Environment                                                 #
+# 3.  Helper function to get territories owned by a player           #
+# ------------------------------------------------------------------- #
+def get_owned_territories(world, player_idx=0):
+    """Get territories owned by the specified player index."""
+    # Try different approaches to find territories owned by the player
+    try:
+        # First try: check if there's a method for this
+        if hasattr(world, "my_territories") and callable(world.my_territories):
+            return world.my_territories()
+        # Second try: check if there's a method with player index
+        elif hasattr(world, "player_territories") and callable(world.player_territories):
+            return world.player_territories(player_idx)
+        # Third try: filter territories by owner
+        else:
+            return [t for t in world.territories if terr_owner(t) == player_idx]
+    except Exception as e:
+        warnings.warn(f"Error getting owned territories: {e}")
+        return []  # Return empty list as fallback
+
+# ------------------------------------------------------------------- #
+# 4.  Gym Environment                                                 #
 # ------------------------------------------------------------------- #
 class RiskEnv(gym.Env):
     """Single‑agent PPO environment: ALPHA vs three rule‑based bots."""
@@ -105,21 +144,34 @@ class RiskEnv(gym.Env):
         super().reset(seed=seed)
         world_reset()
 
+        # Get default map data from world module
+        connect = getattr(pw, "CONNECT", None)
+        areas = getattr(pw, "AREAS", None)
+        
         # create Game – tolerate minimal constructor if full one fails
         try:
             self.game = Game(screen=None, curses=False, color=False, delay=0,
-                             connect=None, cmap=None, ckey=None, areas=None,
-                             wait=False, deal=False)
+                            connect=connect, cmap=None, ckey=None, areas=areas,
+                            wait=False, deal=False)
         except TypeError:
-            self.game = Game()
+            try:
+                # Try with minimal args
+                self.game = Game()
+            except Exception as e:
+                # If all else fails, create a very minimal Game with required attributes
+                self.game = Game.__new__(Game)
+                self.game.world = pw.World()
+                self.game.players = []
+                self.game.current_player = None
+                warnings.warn(f"Failed to create Game properly: {e}")
 
-        # add players
-        self.game.add_player("ALPHA", None)
+        # add players - use HumanControlledAI for ALPHA instead of None
+        self.game.add_player("ALPHA", HumanControlledAI)
         self.game.add_player("BRAVO", AggressiveAI)
         self.game.add_player("CHARLIE", BalancedAI)
         self.game.add_player("DELTA", DefensiveAI)
 
-                # initial placement (random deal)
+        # initial placement (random deal)
         if hasattr(self.game, "initial_placement_auto"):
             try:
                 self.game.initial_placement_auto()
@@ -129,9 +181,11 @@ class RiskEnv(gym.Env):
 
         self.current_step       = 0
         self.start_strategy_idx = 0
-        self._cached_owned      = len(self.game.world.my_territories())
-        self._reinforcements    = getattr(self.game.current_player, "reinforcements", 3)
-        return self._get_obs(), {}(), {}(), {}
+        
+        # Use our helper function instead of directly calling my_territories()
+        self._cached_owned = len(get_owned_territories(self.game.world, 0))
+        self._reinforcements = getattr(self.game.current_player, "reinforcements", 3)
+        return self._get_obs(), {}
 
     # ---------------------------------------------------------------- #
     def step(self, action: int):
@@ -156,7 +210,7 @@ class RiskEnv(gym.Env):
             self.game.play_other_players([AggressiveAI, BalancedAI, DefensiveAI])
 
         # ---- reward shaping --------------------------------------- #
-        owned_now = len(self.game.world.my_territories())
+        owned_now = len(get_owned_territories(self.game.world, 0))
         reward   += (owned_now - self._cached_owned)
         if self.current_step == BOOTSTRAP_TURNS-1 and owned_now >= 1.25*self._cached_owned:
             reward += 20
