@@ -5,13 +5,15 @@ import importlib
 import re
 import collections
 import curses
-from game import Game
 import sys
 import os
-from world import CONNECT, MAP, KEY, AREAS
+from pyrisk.game import Game
+from pyrisk.world import CONNECT, MAP, KEY, AREAS
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 LOG = logging.getLogger("pyrisk")
+
 import argparse
 
 parser = argparse.ArgumentParser()
@@ -57,13 +59,13 @@ for p in args.players:
     if not match:
         continue
     name = match.group(1)
-    package = name[:-2].lower()          # FooAI  ->  foo
+    filename = name[:-2].lower() + "_ai" if name.endswith("AI") else name.lower()
     count = int(match.group(2)[1:]) if match.group(2) else 1
     try:
-        klass = getattr(importlib.import_module("agents." + package), name)
+        klass = getattr(importlib.import_module("agents." + filename), name)
         player_classes.extend([klass] * count)
     except Exception:
-        print(f"Unable to import AI {name} from ai/{package}.py")
+        print(f"Unable to import AI {name} from agents/{filename}.py")
         raise
 
 # --------------------------------------------------------------------- #

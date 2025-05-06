@@ -11,12 +11,14 @@ This file depends on `rl.env.RiskEnv`, which provides the full Risk game
 logic and strategy plumbing.
 """
 from __future__ import annotations
+import warnings
 
 from typing import Dict, List, Type
 import numpy as np
 import gym
 from gym import spaces
 import random
+from rl.env import get_owned_territories
 
 from rl.env import RiskEnv, HARD_STRATS, STRAT_NAMES
 from rl.env import RiskEnv, HARD_STRATS, STRAT_NAMES, _TERRITORIES  # ✅ correct and safe
@@ -59,23 +61,28 @@ class StrategySelectorEnv(gym.Env):
         # Play SEGMENT_TURNS turns with that strategy
         # ------------------------------------------------------------- #
         for turn in range(SEGMENT_TURNS):
-            # For the first call current_step==0, but start_strategy_idx is
-            # already set, so we can simply choose any reinforcement action.
-            # We'll reinforce the first ALPHA‑owned territory.
-            alpha_terr = self.inner_env.game.world.my_territories()[0]
-            terr_idx   = _TERRITORIES.index(alpha_terr)
-            action_id  = 4 + terr_idx  # territory actions are offset by 4
+            # Reinforce the first ALPHA‑owned territory
+            owned_territories = get_owned_territories(self.inner_env.game.world, 0)
+            if not owned_territories:
+                warnings.warn("ALPHA owns no territories. Skipping step.")
+                break  # or: continue  # depending on what behavior you prefer
+
+            alpha_terr = owned_territories[0]
+
+            terr_idx  = _TERRITORIES.index(alpha_terr)
+            action_id = 4 + terr_idx  # territory actions are offset by 4
 
             # Step the inner env once
             self.inner_env.step(action_id)
             if self.inner_env.game.world.game_over():
                 break
 
+
         # ------------------------------------------------------------- #
         # Compute reward
         # ------------------------------------------------------------- #
         owned_before = sum(1 for i in range(0, len(self.start_obs), 2) if self.start_obs[i] == 0)
-        owned_after  = len(self.inner_env.game.world.my_territories())
+        owned_after = len(get_owned_territories(self.inner_env.game.world, player_idx=0))
         reward       = 1.0 if owned_after > owned_before else -1.0
 
         info: Dict = {

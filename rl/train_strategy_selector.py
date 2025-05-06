@@ -2,8 +2,8 @@
 
 Train a small PPO policy whose *only* job is to pick the best opening
 strategy (Aggressive, Balanced, Defensive, Random) given the initial
-Risk board.  The policy sees the raw RiskEnv observation at turn‑0 and
-chooses an action ∈ {0..3}.  The `StrategySelectorEnv` then executes that
+Risk board. The policy sees the raw RiskEnv observation at turn‑0 and
+chooses an action ∈ {0..3}. The `StrategySelectorEnv` then executes that
 strategy for 7 turns and returns a reward (+1 gain / −1 no‑gain).
 
 We also log every outcome to `StrategyTracker`, giving us a persistent
@@ -35,14 +35,18 @@ class TrackerCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         # Called after each rollout step; but we only care at episode end
-        if self.locals.get("dones") is not None:
-            for done, info, obs, action, reward in zip(self.locals["dones"],
-                                                       self.locals["infos"],
-                                                       self.locals["obs"],
-                                                       self.locals["actions"],
-                                                       self.locals["rewards"]):
-                if done:
-                    self.tracker.update(obs, int(action), float(reward))
+        obs     = self.locals.get("obs")
+        dones   = self.locals.get("dones")
+        infos   = self.locals.get("infos")
+        actions = self.locals.get("actions")
+        rewards = self.locals.get("rewards")
+
+        if obs is None or dones is None or infos is None or actions is None or rewards is None:
+            return True  # skip if any required field is missing
+
+        for done, info, ob, action, reward in zip(dones, infos, obs, actions, rewards):
+            if done:
+                self.tracker.update(ob, int(action), float(reward))
         return True
 
 # ------------------------------------------------------------------- #

@@ -177,14 +177,25 @@ class RiskEnv(gym.Env):
                 self.game.initial_placement_auto()
             except Exception as e:
                 warnings.warn(f"initial_placement_auto failed: {e}")
-        # else: assume world_reset handled territory assignment
+        # fallback manual assignment
+            for i, terr in enumerate(_TERRITORIES):
+              owner = i % 4  # 4 players
+              self.game.world._OWNER[terr] = owner
+              self.game.world._TROOPS[terr] = 1
 
         self.current_step       = 0
         self.start_strategy_idx = 0
         
         # Use our helper function instead of directly calling my_territories()
+        # Use our helper function instead of directly calling my_territories()
         self._cached_owned = len(get_owned_territories(self.game.world, 0))
-        self._reinforcements = getattr(self.game.current_player, "reinforcements", 3)
+
+# Fallback if current_player is not assigned yet
+        if hasattr(self.game, "current_player") and self.game.current_player:
+           self._reinforcements = getattr(self.game.current_player, "reinforcements", 3)
+        else:
+          self._reinforcements = 3  # default fallback
+
         return self._get_obs(), {}
 
     # ---------------------------------------------------------------- #

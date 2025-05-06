@@ -4,6 +4,7 @@ from pyrisk.territory import World
 from pyrisk.world import CONNECT, AREAS, MAP, KEY
 import logging
 LOG = logging.getLogger("pyrisk")
+import random
 
 
 class Game(object):
