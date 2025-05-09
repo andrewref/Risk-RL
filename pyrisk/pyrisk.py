@@ -54,6 +54,7 @@ if args.seed is not None:
 #  Load AI classes                                                      #
 # --------------------------------------------------------------------- #
 player_classes = []
+name_to_class = {}  # Map player name (e.g., "ALPHA") to class name (e.g., "PPOAgent")
 for p in args.players:
     match = re.match(r"(\w+)?(\*\d+)?", p)
     if not match:
@@ -86,15 +87,19 @@ kwargs = dict(
 def wrapper(stdscr, **kwargs):
     g = Game(screen=stdscr, **kwargs)
     for i, klass in enumerate(player_classes):
-        g.add_player(NAMES[i], klass)
+        name = NAMES[i]
+        g.add_player(name, klass)
+        name_to_class[name] = klass.__name__
     return g.play()
 
 # Single game or multiple rounds
 if args.games == 1:
     if args.curses:
-        curses.wrapper(wrapper, **kwargs)
+        winner = curses.wrapper(wrapper, **kwargs)
     else:
-        wrapper(None, **kwargs)
+        winner = wrapper(None, **kwargs)
+    winner_class = name_to_class.get(winner, winner)
+    print(f"\n🏆 The winner is: {winner_class}")
 else:
     wins = collections.defaultdict(int)
     for j in range(args.games):
@@ -105,4 +110,5 @@ else:
 
     print(f"Outcome of {args.games} games")
     for k in sorted(wins, key=lambda x: wins[x]):
-        print(f"{k} [{player_classes[NAMES.index(k)].__name__}]:\t{wins[k]}")
+        agent_class = name_to_class.get(k, "?")
+        print(f"{k} [{agent_class}]:\t{wins[k]}")
