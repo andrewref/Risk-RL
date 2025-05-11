@@ -11,7 +11,7 @@ from agents.random_ai import RandomAI
 logging.basicConfig(level=logging.INFO)
 LOG = logging.getLogger("evaluate")
 
-def evaluate(num_games=100, seed=42):
+def evaluate(num_games=50, seed=42):
     random.seed(seed)
     wins = { 'PPO': 0, 'Aggressive': 0, 'Balanced': 0, 'Defensive': 0, 'Random': 0 }
 

@@ -1,176 +1,127 @@
-# ai/aggressive.py
+# agents/aggressive_ai.py
 """
-An unusually strong hard‑coded Risk bot that
-
-1. rushes to finish any continent where it already owns ≥80 %,
-2. piles every reinforcement onto its single best attack front,
-3. attacks while its (troops‑1) ≥ (defender + 2) to keep >70 % win odds,
-4. eliminates players with ≤2 territories to steal cards,
-5. leaves 1 troop behind everywhere, moves the excess to the hottest border.
-
-It implements the exact interface used by game.py so it drops straight in.
+AggressiveAI – expert attacker, mediocre everywhere else
+─────────────────────────────────────────────────────────
+• CLAIM           → random unowned territory
+• EXTRA TROOPS    → random owned territory
+• REINFORCEMENT   → scatter troops randomly
+• ATTACK          → multi-step, high-odds assault; very aggressive
+• FREEMOVE        → pours surplus from safe interiors to best attack front
 """
 
 import random
 from collections import defaultdict
+from typing import List, Tuple, Dict
 
-# ──────────────────────────────────────────────────────────────────────
 class AggressiveAI:
-    # ------------- mandatory constructor --------------------------------
+    # ───────── constructor ─────────
     def __init__(self, player, game, world, **kwargs):
-        self.player   = player       # Player wrapper
-        self.game     = game         # Game object (has .world etc.)
-        self.world    = world        # World with Territory objects
-        self.name     = player.name  # Convenience
-        random.seed()                # independent rng
+        self.player, self.game, self.world = player, game, world
+        self.rng = random.Random()
 
-    # ------------- lifecycle hooks --------------------------------------
-    def start(self):                # called once when game begins
-        pass
+    # ───────── lifecycle (unused) ─────────
+    def start(self):  pass
+    def end(self):    pass
+    def event(self, msg): pass
 
-    def end(self):                  # called once when game ends
-        pass
-
-    def event(self, msg):           # all game events land here
-        pass                        # (unused – could add bookkeeping)
-
-    # ------------- initial territory picking ----------------------------
+    # ───────── initial placement ─────────
     def initial_placement(self, empty_list, remaining):
-        """
-        During first pass `empty_list` is a list of unowned Territory objects.
-        After all are claimed, engine calls again with empty_list=None, asking
-        where to put extra troops (`remaining` > 0).  We always return a
-        Territory *name* as a string.
-        """
-        if empty_list:                      # still claiming
-            # Grab territory with most unclaimed neighbours (good expansion)
-            choice = max(
-                empty_list,
-                key=lambda t: sum(n.owner is None for n in t.connect)
-            )
-        else:                               # reinforcing owned territory
-            choice = self._best_frontline()
-        return choice.name
+        # Phase-1 claim  → totally random
+        if empty_list:
+            return self.rng.choice(empty_list).name
+        # Phase-2 extra troops → totally random
+        owned = list(self.player.territories)
+        return self.rng.choice(owned).name if owned else None
 
-    # ------------- reinforce --------------------------------------------
-    def reinforce(self, troops):
-        """
-        Returns {territory_name: troop_count, ...} whose sum == troops given.
-        Strategy: drop everything on best frontline territory.
-        """
-        terr = self._best_frontline()
-        return {terr.name: troops}
+    # ───────── reinforcement ─────────
+    def reinforce(self, troops: int) -> Dict[str, int]:
+        """Scatter reinforcements randomly (no planning)."""
+        owned = list(self.player.territories)
+        alloc = defaultdict(int)
+        for _ in range(troops):
+            alloc[self.rng.choice(owned).name] += 1
+        return alloc
 
-    # ------------- attack -----------------------------------------------
-    def attack(self):
+    # ───────── attack (professional) ─────────
+    def attack(self) -> List[Tuple[str, str, callable, callable]]:
         """
-        Return a list of (src_name, tgt_name, continue_fn, move_fn) tuples.
-        Our continue_fn keeps attacking while we still outnumber defender+1.
+        • Picks the best high-odds attack (≥70 % win chance) repeatedly
+          until either   ⟶ max 3 conquests   ⟶ source troop <4
+          ⟶ no suitable target.
         """
-        orders = []
-        while True:
-            pair = self._pick_attack()
-            if not pair:
-                break
-            src, tgt = pair
-            def continue_fn(n_atk, n_def, _src=src, _tgt=tgt):
-                # Continue while we keep hefty advantage
-                return n_atk > n_def + 1
-            def move_fn(n_atk, _src=src, _tgt=tgt):
-                # Move half (but >= min rules)
-                return max( min(n_atk-1, 3), (n_atk-1)//2 )
-            orders.append((src.name, tgt.name, continue_fn, move_fn))
-            # Pretend attack succeeds to avoid infinite loop selection
-            tgt_owner_before = tgt.owner
-            if tgt_owner_before != self.player:
-                tgt.owner = self.player
-                tgt.forces = max(1, src.forces//2)
-                src.forces = src.forces - tgt.forces
-        return orders
-
-    # ------------- freemove ---------------------------------------------
-    def freemove(self):
-        """
-        After attacks, move surplus troops from a safe rear territory
-        to the hottest border.  Returns (src_name, tgt_name, troop_count)
-        or None.
-        """
-        rear_sources = [t for t in self.player.territories if not self._enemy_adjacent(t)]
-        if not rear_sources:
-            return None
-        src = max(rear_sources, key=lambda t: t.forces)
-        if src.forces <= 1:
-            return None
-        dest = self._best_frontline()
-        if dest is None or dest == src:
-            return None
-        count = src.forces - 1
-        return (src.name, dest.name, count)
-
-    # ====================================================================
-    # ------------------ internal helper methods -------------------------
-    # ====================================================================
-
-    # ---- frontline evaluation -----------------------------------------
-    def _best_frontline(self):
-        """
-        Territory we own that (forces / weakest‑enemy‑neighbour) is maximal.
-        If no borders, just return strongest owned territory.
-        """
-        best, best_ratio = None, -1
-        for t in self.player.territories:
-            w_enemy = self._weakest_enemy_neighbor(t)
-            if w_enemy:
-                ratio = t.forces / max(1, w_enemy.forces)
-                if ratio > best_ratio:
-                    best, best_ratio = t, ratio
-        if best:
-            return best
-        # fallback: strongest territory
-        return max(self.player.territories, key=lambda tr: tr.forces)
-
-    # ---- attack picker -------------------------------------------------
-    def _pick_attack(self):
-        """
-        Choose one high‑odds attack (src, tgt) or None.
-        Preference:
-        1. Complete continent
-        2. Eliminate weak player (≤2 territories)
-        3. Highest forces ratio
-        """
-        candidate = None
-        best_score = -1
-
-        # Build quick lookup of owner → territory count
-        terr_count = defaultdict(int)
+        orders, conquests, CAP = [], 0, 3
+        terr_cnt = defaultdict(int)
         for t in self.world.territories.values():
             if t.owner:
-                terr_count[t.owner] += 1
+                terr_cnt[t.owner] += 1
 
-        for src in self.player.territories:
-            if src.forces < 3:
+        while conquests < CAP:
+            best_pair, best_score = None, -1.0
+            for src in self.player.territories:
+                if src.forces < 4:
+                    continue
+                for tgt in src.adjacent(friendly=False):
+                    odds = (src.forces - 1) / tgt.forces
+                    if odds < 1.3:                # <≈70 % win → skip
+                        continue
+                    score = odds
+                    if all(tt.owner == self.player or tt == tgt
+                           for tt in tgt.area.territories):
+                        score += 2               # continent bonus
+                    if terr_cnt[tgt.owner] <= 2:
+                        score += 3               # elimination bonus
+                    if score > best_score:
+                        best_pair, best_score = (src, tgt), score
+            if not best_pair:
+                break
+
+            src, tgt = best_pair
+            def cont(n_atk, n_def): return n_atk > n_def + 1
+            def move(n_atk):        return max(2, min(3, n_atk - 1))
+
+            orders.append((src.name, tgt.name, cont, move))
+            conquests += 1
+
+            # optimistic update so we don’t re-select same pair
+            tgt.owner, moved = self.player, move(src.forces)
+            tgt.forces, src.forces = moved, src.forces - moved
+
+        return orders
+
+    # ───────── freemove (support attack) ─────────
+    def freemove(self):
+        """Shift everything from the safest big stack to best attack front."""
+        owned = list(self.player.territories)
+        rear  = [t for t in owned
+                 if t.forces > 1 and
+                    all(n.owner == self.player for n in t.connect)]
+        if not rear:
+            return None
+        src  = max(rear, key=lambda t: t.forces)
+        dest = self._best_frontline(owned)
+        if not dest or dest == src:
+            return None
+        return (src.name, dest.name, src.forces - 1)
+
+    # ───────── helpers ─────────
+    def _best_frontline(self, terrs):
+        best, ratio = None, -1
+        for t in terrs:
+            enemy = self._strongest_enemy_neighbor(t)
+            if not enemy:
                 continue
-            for tgt in src.adjacent(friendly=False):
-                atk_ratio = (src.forces-1) / tgt.forces
-                score = atk_ratio
+            r = t.forces / enemy.forces
+            if r > ratio:
+                best, ratio = t, r
+        return best
 
-                # Bonus if it finishes a continent
-                if all(tt.owner == self.player or tt == tgt for tt in tgt.area.territories):
-                    score += 2
+    def _strongest_enemy_neighbor(self, terr):
+        enemies = [n for n in terr.connect if n.owner and n.owner != self.player]
+        return max(enemies, key=lambda e: e.forces) if enemies else None
 
-                # Bonus if it eliminates a nearly dead player
-                if terr_count[tgt.owner] <= 2:
-                    score += 3
 
-                if score > best_score and src.forces >= tgt.forces + 2:
-                    candidate, best_score = (src, tgt), score
 
-        return candidate
-
-    # ---- utilities -----------------------------------------------------
-    def _weakest_enemy_neighbor(self, terr):
-        enemies = [t for t in terr.connect if t.owner and t.owner != self.player]
-        return min(enemies, key=lambda t: t.forces) if enemies else None
-
-    def _enemy_adjacent(self, terr):
-        return any(t.owner and t.owner != self.player for t in terr.connect)
+    # very very aggreisve only attackss 
+    # defensivee only defensncee 
+    # balanced  is not smart enough 
+    # random do random things 

@@ -1,150 +1,150 @@
-# ai/balanced_ai_v2.py
+# agents/balanced_ai.py
 """
-BalancedAI‑v2 – stronger but still “moderate” bot.
-
-– Dynamic aggression: 2 conquests early‑game, 4 once we’re big.
-– Lower threshold (1.15×) for continent‑finishing or eliminations.
-– Continues dice rolls while advantage holds, up to turn‑cap.
-– Reinforcements: 70 % weakest border, 30 % spear‑head.
+BalancedAI 3.0 – even-keeled strategist
+───────────────────────────────────────
+• CLAIM            – prefers expandable spots, but not obsessively.
+• EXTRA TROOPS     – drops on weakest border (fallback: random).
+• REINFORCEMENT    – 50 % weakest border, 50 % strongest border (if any).
+• ATTACK           – cautious-but-active: up to 2 conquests early, 3 later;
+                     needs ~65 % win odds (ratio ≥ 1.25, or 1.1 for
+                     continent finish / elimination).
+• FREEMOVE         – shifts surplus from safest interior to weakest border
+                     or spearhead.
 """
 
 import random
 from collections import defaultdict
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 class BalancedAI:
+    # ───────────────── constructor ─────────────────
     def __init__(self, player, game, world, **kwargs):
-        self.player = player
-        self.game   = game
-        self.world  = world
-        self.rng    = random.Random()
+        self.player, self.game, self.world = player, game, world
+        self.rng = random.Random()
 
+    # ───────────────── lifecycle (unused) ──────────
     def start(self):  pass
     def end(self):    pass
     def event(self, msg): pass
 
+    # ───────────── initial placement ───────────────
     def initial_placement(self, empty_list, remaining):
-        if empty_list:
-            pick = max(empty_list,
-                       key=lambda t: sum(n.owner is None for n in t.connect))
-        else:
-            terrs = list(self.player.territories)
-            pick  = self._weakest_border(terrs) or self.rng.choice(terrs)
+        if empty_list:                              # claim
+            # Choose territory with many unclaimed neighbours (good growth)
+            return max(empty_list,
+                       key=lambda t: sum(n.owner is None for n in t.connect)
+                      ).name
+        # extra troops  – place on weakest border (fallback random)
+        owned = list(self.player.territories)
+        pick  = self._weakest_border(owned) or self.rng.choice(owned)
         return pick.name
 
-    def reinforce(self, troops: int):
-        terrs = list(self.player.territories)
-        weakest   = self._weakest_border(terrs)
-        spearhead = self._strongest_border(terrs)
-        if weakest is None:
-            return {self.rng.choice(terrs).name: troops}
-        if spearhead is None or spearhead == weakest:
-            return {weakest.name: troops}
-        wk_share = int(troops * 0.7)
-        sp_share = troops - wk_share
-        return {weakest.name: wk_share, spearhead.name: sp_share}
+    # ───────────── reinforcement (50 / 50) ─────────
+    def reinforce(self, troops: int) -> Dict[str, int]:
+        owned = list(self.player.territories)
+        wk = self._weakest_border(owned)
+        sp = self._strongest_border(owned)
+        if wk is None:
+            return {self.rng.choice(owned).name: troops}
+        if sp is None or sp == wk:
+            return {wk.name: troops}
+        half = troops // 2
+        return {wk.name: half, sp.name: troops - half}
 
+    # ───────────── attack (moderate) ───────────────
     def attack(self) -> List[Tuple[str, str, callable, callable]]:
-        orders = []
-        conquests = 0
-        terrs = list(self.player.territories)
+        orders, conquests = [], 0
+        owned_territories = list(self.player.territories)
 
-        def owned_count():
-            return len(terrs)
-
-        def max_conquests():
-            owned = owned_count()
-            bonus = self.player.reinforcements - 3
-            return 4 if owned >= 25 or bonus >= 5 else 2
+        # Dynamic cap: 2 conquests early, 3 when we’re larger
+        def max_cons():
+            owned = len(owned_territories)
+            return 3 if owned >= 20 else 2
 
         terr_cnt = defaultdict(int)
         for t in self.world.territories.values():
             if t.owner:
                 terr_cnt[t.owner] += 1
 
-        while conquests < max_conquests():
-            candidates = []
-
-            for src in terrs:
-                if src.forces < 3:
+        while conquests < max_cons():
+            best_pair, best_score = None, -1.0
+            for src in owned_territories:
+                if src.forces < 4:
                     continue
                 for tgt in src.adjacent(friendly=False):
-                    base_ratio = (src.forces - 1) / tgt.forces
-                    need_ratio = 1.3
+                    ratio = (src.forces - 1) / tgt.forces
+                    need  = 1.25                      # ≈65 % odds baseline
 
-                    finishes_area = all(
-                        tt.owner == self.player or tt == tgt
-                        for tt in tgt.area.territories
-                    )
+                    finishes = all(tt.owner == self.player or tt == tgt
+                                   for tt in tgt.area.territories)
                     eliminates = terr_cnt[tgt.owner] <= 2
+                    if finishes or eliminates:
+                        need = 1.10                  # more willing
 
-                    if finishes_area or eliminates:
-                        need_ratio = 1.15
-
-                    if base_ratio < need_ratio:
+                    if ratio < need:
                         continue
 
-                    score = base_ratio
-                    if finishes_area: score += 2.0
-                    if eliminates:    score += 3.0
-                    candidates.append((score, src, tgt))
+                    score = ratio
+                    if finishes:   score += 1.5
+                    if eliminates: score += 2.0
+                    if score > best_score:
+                        best_pair, best_score = (src, tgt), score
 
-            if not candidates:
+            if not best_pair:
                 break
 
-            _, src, tgt = max(candidates, key=lambda stt: stt[0])
+            src, tgt = best_pair
+            def cont(n_atk, n_def):
+                return n_atk > n_def + 1 and len(orders) < max_cons()
 
-            def continue_fn(n_atk, n_def, _mx=max_conquests()):
-                return n_atk > n_def + 1 and len(orders) < _mx
-
-            def move_fn(n_atk):
+            def move(n_atk):
                 return max(2, min(3, n_atk // 2))
 
-            orders.append((src.name, tgt.name, continue_fn, move_fn))
+            orders.append((src.name, tgt.name, cont, move))
             conquests += 1
 
-            tgt.owner  = self.player
-            moved      = move_fn(src.forces)
-            tgt.forces = moved
-            src.forces -= moved
+            # optimistic update
+            tgt.owner, moved = self.player, move(src.forces)
+            tgt.forces, src.forces = moved, src.forces - moved
 
         return orders
 
+    # ───────────── freemove (support defence) ──────
     def freemove(self):
-        terrs = list(self.player.territories)
-        rear  = [t for t in terrs
+        owned = list(self.player.territories)
+        rear  = [t for t in owned
                  if t.forces > 1 and
                     all(n.owner == self.player for n in t.connect)]
         if not rear:
             return None
 
-        src = max(rear, key=lambda t: t.forces)
-        dest = self._weakest_border(terrs) or self._strongest_border(terrs)
-        if dest is None or dest == src:
+        src  = max(rear, key=lambda t: t.forces)
+        dest = self._weakest_border(owned) or self._strongest_border(owned)
+        if not dest or dest == src:
             return None
-        move = src.forces - 1
-        return (src.name, dest.name, move)
+        return (src.name, dest.name, src.forces - 1)
 
+    # ───────────── helpers ─────────────────────────
     def _weakest_border(self, terrs):
-        weakest, worst_ratio = None, float("inf")
+        weakest, worst = None, float("inf")
         for t in terrs:
             enemies = [n for n in t.connect if n.owner and n.owner != self.player]
             if not enemies:
                 continue
             strongest = max(enemies, key=lambda n: n.forces)
             ratio = t.forces / strongest.forces
-            if ratio < worst_ratio:
-                weakest, worst_ratio = t, ratio
+            if ratio < worst:
+                weakest, worst = t, ratio
         return weakest
 
     def _strongest_border(self, terrs):
-        best, best_ratio = None, -1.0
+        strongest, best = None, -1.0
         for t in terrs:
             enemies = [n for n in t.connect if n.owner and n.owner != self.player]
             if not enemies:
                 continue
-            weakest = min(enemies, key=lambda n: n.forces)
-            ratio = t.forces / weakest.forces
-            if ratio > best_ratio:
-                best, best_ratio = t, ratio
-        return best
+            weakest_enemy = min(enemies, key=lambda n: n.forces)
+            ratio = t.forces / weakest_enemy.forces
+            if ratio > best:
+                strongest, best = t, ratio
+        return strongest
