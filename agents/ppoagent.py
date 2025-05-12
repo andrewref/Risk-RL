@@ -1,12 +1,14 @@
-# agents/ppoagent.py  –  exploration + correct segment counts + save OK
-import os, logging, numpy as np, torch
+import os
+import logging
+import numpy as np
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from agents.aggressive_ai import AggressiveAI
-from agents.balanced_ai   import BalancedAI
-from agents.defensive_ai  import DefensiveAI
-from agents.random_ai     import RandomAI
+from agents.balanced_ai import BalancedAI
+from agents.defensive_ai import DefensiveAI
+from agents.random_ai import RandomAI
 
 LOG = logging.getLogger("pyrisk.player.PPOAgent")
 
@@ -22,6 +24,7 @@ class ActorNet(nn.Module):
         nn.init.uniform_(self.body[-1].weight, -0.01, 0.01)
         nn.init.constant_(self.body[-1].bias, 0.0)
         self.opt = optim.Adam(self.parameters(), lr=lr)
+
     def forward(self, x):
         return torch.softmax(self.body(x), dim=-1)
 
@@ -34,6 +37,7 @@ class CriticNet(nn.Module):
             nn.Linear(hid, 1)
         )
         self.opt = optim.Adam(self.parameters(), lr=lr)
+
     def forward(self, x):
         return self.body(x)
 
@@ -46,26 +50,30 @@ class PPOAgent:
         self.player, self.game, self.world = player, game, world
         self.name = player.name
 
+        # Define strategies
         self.strats = {
             'aggressive': AggressiveAI(player, game, world),
-            'balanced'  : BalancedAI (player, game, world),
-            'defensive' : DefensiveAI(player, game, world),
-            'random'    : RandomAI   (player, game, world)
+            'balanced': BalancedAI(player, game, world),
+            'defensive': DefensiveAI(player, game, world),
+            'random': RandomAI(player, game, world)
         }
         self.idx2str = list(self.strats.keys())
         self.cur_str = 'random'
 
-        self.actor  = ActorNet(5, len(self.idx2str))
+        # Neural Networks
+        self.actor = ActorNet(5, len(self.idx2str))
         self.critic = CriticNet(5)
 
+        # Memory for PPO
         self.mem = {k: [] for k in ['s', 'a', 'lp', 'r', 'd']}
         self.step = 0
         self.prev_state = self.prev_action = self.prev_lp = None
-        self.snap_prev  = None
+        self.snap_prev = None
 
-        # per-game tallies
+        # Per-game tallies
         self.count = {k: 0 for k in self.idx2str}
-        self.rew   = {k: [] for k in self.idx2str}
+        self.rew = {k: [] for k in self.idx2str}
+        self.punished = {k: 0 for k in self.idx2str}  # Track number of times strategy is punished
 
         self.model_path = 'ppo_model.pt'
         if os.path.exists(self.model_path):
@@ -77,7 +85,7 @@ class PPOAgent:
     def _feat(self):
         p = self.game.players[self.name]
         t_all = sum(pl.territory_count for pl in self.game.players.values() if pl.alive)
-        f_all = sum(pl.forces          for pl in self.game.players.values() if pl.alive)
+        f_all = sum(pl.forces for pl in self.game.players.values() if pl.alive)
         t_ratio = p.territory_count / t_all if t_all else 0
         f_ratio = p.forces / f_all if f_all else 0
         control = sum(1 for _ in p.areas) / len(self.world.areas)
@@ -90,7 +98,7 @@ class PPOAgent:
                         enemy.append(nb.forces)
                         own.append(terr.forces)
         threat = float(np.mean(enemy)) if enemy else 0
-        weak   = float(np.mean(own)/np.mean(enemy)) if (own and enemy and np.mean(enemy)>0) else 0
+        weak = float(np.mean(own) / np.mean(enemy)) if (own and enemy and np.mean(enemy) > 0) else 0
         return torch.tensor([t_ratio, f_ratio, control, threat, weak], dtype=torch.float32)
 
     def _snap(self):
@@ -100,21 +108,33 @@ class PPOAgent:
                     areas=sum(1 for _ in p.areas),
                     alive=int(p.alive))
 
-    def _reward(self, a, b):
-        r  = (b['terr']-a['terr'])*0.5
-        r += (b['forces']-a['forces'])*0.1
-        r += (b['areas']-a['areas'])*2.0
-        if not a['alive'] and b['alive']: r += 2
-        if a['alive'] and not b['alive']: r -= 5
+    def _reward(self, prev_snap, cur_snap):
+        """
+        Calculate the reward between the previous and current snapshots.
+        prev_snap: The previous state snapshot
+        cur_snap: The current state snapshot
+        """
+        r = (cur_snap['terr'] - prev_snap['terr']) * 0.5
+        r += (cur_snap['forces'] - prev_snap['forces']) * 0.1
+        r += (cur_snap['areas'] - prev_snap['areas']) * 2.0
+        if not prev_snap['alive'] and cur_snap['alive']: r += 2  # Rebirth reward
+        if prev_snap['alive'] and not cur_snap['alive']: r -= 5  # Death penalty
         return r
 
+    # Punish strategies that performed poorly
+    def _punish(self, punished_strat):
+        self.punished[punished_strat] += 1
+        if self.punished[punished_strat] > 2:  # Punish a strategy if it fails multiple times
+            self.eps_greedy = 0.2
+            self.punished[punished_strat] = 0  # Reset after handling punishment
+
     # ε-greedy choose
-    def _choose(self, s):
+    def _choose(self, state):
         if np.random.rand() < self.eps_greedy:
             a = np.random.randint(len(self.idx2str))
-            lp = torch.log(torch.tensor(1/len(self.idx2str)))
+            lp = torch.log(torch.tensor(1 / len(self.idx2str)))
             return a, lp
-        dist = torch.distributions.Categorical(self.actor(s))
+        dist = torch.distributions.Categorical(self.actor(state))
         a = dist.sample()
         return a.item(), dist.log_prob(a)
 
@@ -136,14 +156,19 @@ class PPOAgent:
             dist = torch.distributions.Categorical(self.actor(S))
             NL = dist.log_prob(A)
             ratio = torch.exp(NL - OL)
-            surr = torch.min(ratio*adv,
-                             torch.clamp(ratio, 1-self.eps_clip, 1+self.eps_clip)*adv)
+            surr = torch.min(ratio * adv,
+                             torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * adv)
             lossA = -surr.mean()
             lossC = F.mse_loss(self.critic(S).squeeze(), ret)
-            loss = lossA + 0.5*lossC - self.entropy_coef*dist.entropy().mean()
-            self.actor.opt.zero_grad(); self.critic.opt.zero_grad()
-            loss.backward(); self.actor.opt.step(); self.critic.opt.step()
-        for k in self.mem: self.mem[k].clear()
+            loss = lossA + 0.5 * lossC - self.entropy_coef * dist.entropy().mean()
+            self.actor.opt.zero_grad()
+            self.critic.opt.zero_grad()
+            loss.backward()
+            self.actor.opt.step()
+            self.critic.opt.step()
+
+        for k in self.mem:
+            self.mem[k].clear()
 
     # save
     def _save(self):
@@ -160,12 +185,12 @@ class PPOAgent:
         # reset per-game tallies
         for k in self.idx2str:
             self.count[k] = 0
-            self.rew[k]   = []
+            self.rew[k] = []
         self.step = 0
         self.cur_str = 'random'
         self.count[self.cur_str] += 1
         self.prev_state = None
-        self.snap_prev  = self._snap()
+        self.snap_prev = self._snap()
         for s in self.strats.values():
             s.start()
 
@@ -181,8 +206,12 @@ class PPOAgent:
             self.mem['s'].append(self.prev_state)
             self.mem['a'].append(self.prev_action)
             self.mem['lp'].append(self.prev_lp)
-            self.mem['r'].append(rew); self.mem['d'].append(0)
+            self.mem['r'].append(rew)
+            self.mem['d'].append(0)
             self.rew[self.cur_str].append(rew)
+
+            # Punish strategies that performed poorly
+            self._punish(self.cur_str)
 
             # choose next strategy
             a, lp = self._choose(st)
@@ -191,7 +220,7 @@ class PPOAgent:
             self.prev_state, self.prev_action, self.prev_lp = st, a, lp
             self.snap_prev = snap
 
-        # initialise first segment state lazily
+        # initialize first segment state lazily
         if self.prev_state is None:
             self.prev_state = self._feat()
             self.prev_action, self.prev_lp = 0, torch.log(torch.tensor(0.25))
@@ -199,19 +228,24 @@ class PPOAgent:
         self.step += 1
         return self.strats[self.cur_str].reinforce(troops)
 
-    def attack (self): return self.strats[self.cur_str].attack()
-    def freemove(self): return self.strats[self.cur_str].freemove()
+    def attack(self):
+        return self.strats[self.cur_str].attack()
+
+    def freemove(self):
+        return self.strats[self.cur_str].freemove()
 
     def end(self):
         snap = self._snap()
-        rew  = self._reward(self.snap_prev, snap)
+        rew = self._reward(self.snap_prev, snap)
         self.mem['s'].append(self.prev_state)
         self.mem['a'].append(self.prev_action)
         self.mem['lp'].append(self.prev_lp)
-        self.mem['r'].append(rew); self.mem['d'].append(1)
+        self.mem['r'].append(rew)
+        self.mem['d'].append(1)
         self.rew[self.cur_str].append(rew)
 
-        self._ppo(); self._save()
+        self._ppo()
+        self._save()
         for s in self.strats.values():
             s.end()
 
