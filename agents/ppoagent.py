@@ -1,229 +1,285 @@
-# agents/ppoagent.py  — PPO meta‑agent that learns to pick from four hard‑coded strategies
-# ---------------------------------------------------------------------------
-# This version adds a **bias table** that is directly reinforced:
-#   • Bad reward  → strategy bias is decreased (punished) → lower chance next time
-#   • Good reward → strategy bias is increased (rewarded) → higher chance next time
-# The bias values influence sampling *only* (not training), so the PPO gradient
-# sees the true actor probabilities and remains stable.
-# ---------------------------------------------------------------------------
-
 import os
 import logging
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
+from torch import Tensor
+from torch.distributions import Categorical
+from torch.nn.utils import clip_grad_norm_
+from torch.optim.lr_scheduler import LambdaLR
+
 from agents.aggressive_ai import AggressiveAI
-from agents.balanced_ai   import BalancedAI
-from agents.defensive_ai  import DefensiveAI
-from agents.random_ai     import RandomAI
+from agents.balanced_ai import BalancedAI
+from agents.defensive_ai import DefensiveAI
+from agents.random_ai import RandomAI
 
-LOG = logging.getLogger("pyrisk.player.PPOAgent")
+LOG = logging.getLogger(__name__)
 
-# ───────────────────────── networks ─────────────────────────
+@dataclass
+class PPOConfig:
+    seg_len: int = 7                     # steps per update segment
+    gamma: float = 0.99                  # discount factor
+    gae_lambda: float = 0.95             # GAE lambda
+    eps_clip: float = 0.2                # PPO clip threshold
+    k_epochs: int = 4                    # PPO update epochs
+    entropy_coef: float = 0.01           # entropy regularization weight
+    reward_scale: float = 10.0           # reward scaling factor
+    lr_actor: float = 3e-4               # actor learning rate
+    lr_critic: float = 1e-3              # critic learning rate
+    clip_grad_norm: float = 0.5          # gradient norm clipping
+    lr_schedule: bool = True             # enable LR annealing
+    total_updates: int = 10000           # total updates for annealing schedule
+    model_path: str = "ppo_model.pt"    # checkpoint path
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
 class ActorNet(nn.Module):
-    def __init__(self, inp: int, n_act: int, hid: int = 64, lr: float = 1e-3):
+    def __init__(self, in_dim: int, out_dim: int, hid: int = 64) -> None:
         super().__init__()
-        self.body = nn.Sequential(
-            nn.Linear(inp, hid), nn.ReLU(),
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hid), nn.ReLU(),
             nn.Linear(hid, hid), nn.ReLU(),
-            nn.Linear(hid, n_act)
+            nn.Linear(hid, out_dim)
         )
-        nn.init.uniform_(self.body[-1].weight, -0.01, 0.01)
-        nn.init.constant_(self.body[-1].bias, 0.0)
-        self.opt = optim.Adam(self.parameters(), lr=lr)
+        nn.init.uniform_(self.net[-1].weight, -0.01, 0.01)
+        nn.init.zeros_(self.net[-1].bias)
 
-    def forward(self, x):                     # → raw logits
-        return self.body(x)
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
 
 class CriticNet(nn.Module):
-    def __init__(self, inp: int, hid: int = 64, lr: float = 1e-3):
+    def __init__(self, in_dim: int, hid: int = 64) -> None:
         super().__init__()
-        self.body = nn.Sequential(
-            nn.Linear(inp, hid), nn.ReLU(),
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hid), nn.ReLU(),
             nn.Linear(hid, hid), nn.ReLU(),
             nn.Linear(hid, 1)
         )
-        self.opt = optim.Adam(self.parameters(), lr=lr)
 
-    def forward(self, x):
-        return self.body(x)
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x).squeeze(-1)
 
-# ───────────────────────── PPOAgent ─────────────────────────
 class PPOAgent:
-    seg_len, gamma, eps_clip, k_epochs = 7, 0.99, 0.20, 4
-    entropy_coef, eps_greedy_base = 0.01, 0.10
-    eps_greedy_max = 0.40
-    bias_step, bias_min, bias_max = 0.10, 0.20, 3.0
+    """
+    PPO meta-agent selecting among sub-strategies with GAE, LR scheduling,
+    gradient clipping, and event propagation.
+    """
 
-    def __init__(self, player, game, world, **_):
+    def __init__(self, player, game, world, config: PPOConfig = PPOConfig()):
         self.player, self.game, self.world = player, game, world
-        self.name = player.name
+        self.config = config
+        self.device = torch.device(config.device)
+        LOG.info(f"Using device: {self.device}")
 
-        self.strats = {
+        # Sub-strategies
+        self.strategies: Dict[str, object] = {
             'aggressive': AggressiveAI(player, game, world),
-            'balanced'  : BalancedAI (player, game, world),
-            'defensive' : DefensiveAI(player, game, world),
-            'random'    : RandomAI   (player, game, world)
+            'balanced': BalancedAI(player, game, world),
+            'defensive': DefensiveAI(player, game, world),
+            'random': RandomAI(player, game, world)
         }
-        self.idx2str = list(self.strats.keys())
+        self.names = list(self.strategies.keys())
+        obs_dim = 5
 
-        self.actor  = ActorNet(5, len(self.idx2str))
-        self.critic = CriticNet(5)
+        # Networks
+        self.actor = ActorNet(obs_dim, len(self.names)).to(self.device)
+        self.critic = CriticNet(obs_dim).to(self.device)
+        self.opt_actor = optim.Adam(self.actor.parameters(), lr=config.lr_actor)
+        self.opt_critic = optim.Adam(self.critic.parameters(), lr=config.lr_critic)
 
-        self.mem = {k: [] for k in ['s', 'a', 'lp', 'r', 'd']}
+        # LR schedulers
+        if config.lr_schedule:
+            lr_lambda = lambda step: max(1 - step / config.total_updates, 0)
+            self.sched_actor = LambdaLR(self.opt_actor, lr_lambda)
+            self.sched_critic = LambdaLR(self.opt_critic, lr_lambda)
+
+        # Memory buffers
+        self.memory = {k: [] for k in ['state','action','logprob','reward','done']}
+
+        # Runtime state
         self.step = 0
-        self.cur_str = 'random'
-        self.prev_state = self.prev_lp = None
-        self.prev_action = self.idx2str.index(self.cur_str)
-        self.snap_prev  = None
+        self.current = 'random'
+        self.prev_state: Tensor = None
+        self.prev_logprob: Tensor = None
+        self.prev_action: int = 0
+        self.snapshot_prev = None
 
-        self.count   = {k: 0 for k in self.idx2str}
-        self.rew     = {k: [] for k in self.idx2str}
-        self.punish  = {k: 0 for k in self.idx2str}
-        self.eps_greedy = self.eps_greedy_base
-        self.bias = {k: 1.0 for k in self.idx2str}
+        # Exploration & biases
+        self.eps = config.eps_clip
+        self.bias = {n:1.0 for n in self.names}
+        self.punish = {n:0 for n in self.names}
+        self.usage = {n:0 for n in self.names}
+        self.count = {n:0 for n in self.names}
+        self.returns = {n:[] for n in self.names}
 
-        self.model_path = 'ppo_model2.pt'
-        if os.path.exists(self.model_path):
-            ck = torch.load(self.model_path, map_location='cpu')
-            self.actor.load_state_dict(ck['actor'], strict=False)
-            self.critic.load_state_dict(ck['critic'], strict=False)
+        # Load checkpoint
+        self._load()
 
-    def _feat(self):
-        p = self.game.players[self.name]
+    def event(self, msg):
+        """Propagate game events to sub-strategies."""
+        for strat in self.strategies.values():
+            if hasattr(strat, 'event'):
+                strat.event(msg)
+
+    def _load(self):
+        if os.path.exists(self.config.model_path):
+            data = torch.load(self.config.model_path, map_location=self.device)
+            self.actor.load_state_dict(data.get('actor', {}), strict=False)
+            self.critic.load_state_dict(data.get('critic', {}), strict=False)
+            LOG.info(f"Loaded checkpoint {self.config.model_path} (strict=False)")
+
+    def _save(self):
+        torch.save({'actor':self.actor.state_dict(), 'critic':self.critic.state_dict()}, self.config.model_path)
+        LOG.info(f"Saved checkpoint to {self.config.model_path}")
+
+    def _features(self) -> Tensor:
+        p = self.game.players[self.player.name]
         t_all = sum(pl.territory_count for pl in self.game.players.values() if pl.alive)
-        f_all = sum(pl.forces          for pl in self.game.players.values() if pl.alive)
-        t_ratio = p.territory_count / t_all if t_all else 0.0
-        f_ratio = p.forces           / f_all if f_all else 0.0
-        control = sum(1 for _ in p.areas) / len(self.world.areas)
+        f_all = sum(pl.forces for pl in self.game.players.values() if pl.alive)
+        ratios = torch.tensor([
+            p.territory_count/t_all if t_all else 0.0,
+            p.forces/f_all if f_all else 0.0,
+            sum(1 for _ in p.areas)/len(self.world.areas)
+        ], device=self.device)
         enemy, own = [], []
         for terr in self.world.territories.values():
             if terr.owner == p:
                 for nb in terr.connect:
                     if nb.owner and nb.owner != p:
-                        enemy.append(nb.forces); own.append(terr.forces)
+                        enemy.append(nb.forces)
+                        own.append(terr.forces)
         threat = float(np.mean(enemy)) if enemy else 0.0
-        weak   = float(np.mean(own)/np.mean(enemy)) if (own and enemy and np.mean(enemy)>0) else 0.0
-        return torch.tensor([t_ratio, f_ratio, control, threat, weak], dtype=torch.float32)
+        strength = float(np.mean(own)/np.mean(enemy)) if enemy and np.mean(enemy)>0 else 0.0
+        return torch.cat([ratios, torch.tensor([threat, strength], device=self.device)])
 
-    def _snap(self):
-        p = self.game.players[self.name]
-        return dict(terr=p.territory_count, forces=p.forces,
-                    areas=sum(1 for _ in p.areas), alive=int(p.alive))
+    def _snapshot(self) -> Dict[str, float]:
+        p = self.game.players[self.player.name]
+        return {
+            'terr': p.territory_count,
+            'forces': p.forces,
+            'areas': sum(1 for _ in p.areas),
+            'alive': int(p.alive)
+        }
 
-    @staticmethod
-    def _reward(a: dict, b: dict):
-        r  = (b['terr']  - a['terr']) * 0.5
-        r += (b['forces']- a['forces']) * 0.1
-        r += (b['areas'] - a['areas']) * 2.0
-        if not a['alive'] and b['alive']: r += 2.0
-        if a['alive'] and not b['alive']: r -= 5.0
-        return r
+    def _gae(self, rewards: List[float], dones: List[int], values: Tensor) -> Tuple[Tensor, Tensor]:
+        gae = 0
+        advantages = []
+        vals = values.detach().cpu().numpy().tolist() + [0]
+        for r, d, v, v_next in zip(reversed(rewards), reversed(dones), reversed(vals[:-1]), reversed(vals[1:])):
+            delta = r + self.config.gamma * v_next * (1-d) - v
+            gae = delta + self.config.gamma * self.config.gae_lambda * (1-d) * gae
+            advantages.insert(0, gae)
+        returns = [adv + v for adv, v in zip(advantages, vals[:-1])]
+        return torch.tensor(advantages, device=self.device), torch.tensor(returns, device=self.device)
 
-    def _choose(self, state):
-        # exploration
-        if np.random.rand() < self.eps_greedy:
-            a  = np.random.randint(len(self.idx2str))
-            lp = torch.log(torch.tensor(1.0/len(self.idx2str)))
-            return a, lp
-
-        logits = self.actor(state)
-        plain_probs = torch.softmax(logits, dim=-1)
-        # apply bias only for sampling
-        bias_tensor = torch.tensor([self.bias[k] for k in self.idx2str], dtype=state.dtype)
-        biased_probs = plain_probs * bias_tensor
-        biased_probs = biased_probs / biased_probs.sum()
-        dist_bias = torch.distributions.Categorical(biased_probs)
-        a = dist_bias.sample()
-        # store actor-only log-prob for PPO training
-        dist_actor = torch.distributions.Categorical(plain_probs)
-        lp = dist_actor.log_prob(a)
-        return a.item(), lp
-
-    def _adjust_bias(self, sname: str, rew: float):
-        rew = max(-3.0, min(3.0, rew))  # clip reward
-        if rew < 0:
-            self.bias[sname] = max(self.bias_min, self.bias[sname] - self.bias_step)
-            self.punish[sname] += 1
-            if self.punish[sname] >= 3:
-                self.eps_greedy = min(self.eps_greedy + 0.05, self.eps_greedy_max)
-                self.punish[sname] = 0
+    def _choose_action(self, state: Tensor) -> Tuple[int, Tensor]:
+        if np.random.rand() < self.eps:
+            act = np.random.randint(len(self.names))
+            logp = torch.log(torch.tensor(1/len(self.names), device=self.device))
         else:
-            self.bias[sname] = min(self.bias_max, self.bias[sname] + self.bias_step)
-            self.punish[sname] = 0
-            self.eps_greedy = max(self.eps_greedy_base, self.eps_greedy - 0.01)
+            logits = self.actor(state)
+            probs = torch.softmax(logits, dim=-1)
+            bias_arr = torch.tensor([self.bias[n] for n in self.names], device=self.device)
+            probs = (probs * bias_arr).clamp(min=1e-8)
+            probs /= probs.sum()
+            dist = Categorical(probs)
+            act = dist.sample().item()
+            logp = dist.log_prob(torch.tensor(act, device=self.device))
+        return act, logp
 
-    def _ppo(self):
-        S = torch.stack(self.mem['s'])
-        A = torch.tensor(self.mem['a'])
-        oldlp = torch.stack(self.mem['lp']).detach()
-        R, D = self.mem['r'], self.mem['d']
-        ret, G = [], 0.0
-        for r, dn in zip(reversed(R), reversed(D)):
-            G = r + self.gamma * G * (1 - dn)
-            ret.insert(0, G)
-        ret = torch.tensor(ret)
-        adv = ret - self.critic(S).squeeze().detach()
-        for _ in range(self.k_epochs):
-            dist = torch.distributions.Categorical(torch.softmax(self.actor(S), dim=-1))
-            newlp= dist.log_prob(A)
-            ratio= torch.exp(newlp - oldlp)
-            surr= torch.min(ratio * adv,
-                           torch.clamp(ratio,1-self.eps_clip,1+self.eps_clip)*adv)
-            loss = -surr.mean() + 0.5*F.mse_loss(self.critic(S).squeeze(), ret)
-            loss -= self.entropy_coef * dist.entropy().mean()
-            self.actor.opt.zero_grad(); self.critic.opt.zero_grad()
-            loss.backward(); self.actor.opt.step(); self.critic.opt.step()
-        for k in self.mem: self.mem[k].clear()
+    def _ppo_update(self) -> None:
+        S = torch.stack(self.memory['state'])
+        A = torch.tensor(self.memory['action'], device=self.device)
+        old_logp = torch.stack(self.memory['logprob']).detach()
+        R, D = self.memory['reward'], self.memory['done']
+        with torch.no_grad(): vals = self.critic(S)
+        adv, ret = self._gae(R, D, vals)
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        for _ in range(self.config.k_epochs):
+            dist = Categorical(torch.softmax(self.actor(S), dim=-1))
+            new_logp = dist.log_prob(A)
+            ratio = (new_logp - old_logp).exp()
+            surr = torch.min(ratio * adv, torch.clamp(ratio, 1-self.config.eps_clip, 1+self.config.eps_clip) * adv)
+            loss = -surr.mean() + 0.5 * nn.MSELoss()(self.critic(S), ret) - self.config.entropy_coef * dist.entropy().mean()
+            self.opt_actor.zero_grad(); self.opt_critic.zero_grad()
+            loss.backward()
+            clip_grad_norm_(self.actor.parameters(), self.config.clip_grad_norm)
+            clip_grad_norm_(self.critic.parameters(), self.config.clip_grad_norm)
+            self.opt_actor.step(); self.opt_critic.step()
+        if self.config.lr_schedule:
+            self.sched_actor.step(); self.sched_critic.step()
+        for k in self.memory: self.memory[k].clear()
 
-    def _save(self):
-        torch.save({'actor': self.actor.state_dict(),
-                    'critic': self.critic.state_dict()}, self.model_path)
+    def start(self) -> None:
+        self.step = 0; self.current = 'random'; self.prev_state = None; self.prev_logprob = None
+        self.prev_action = self.names.index(self.current)
+        self.snapshot_prev = self._snapshot(); self.eps = self.config.eps_clip
+        for n in self.names: self.bias[n] = 1.0; self.punish[n] = 0; self.usage[n] = 0; self.count[n] = 0; self.returns[n] = []
+        for strat in self.strategies.values(): strat.start()
 
-    def event(self, msg):
-        for s in self.strats.values():
-            if hasattr(s, 'event'): s.event(msg)
+    def initial_placement(self, *args, **kwargs):
+        return self.strategies[self.current].initial_placement(*args, **kwargs)
 
-    def start(self):
-        for k in self.idx2str:
-            self.count[k]=0; self.rew[k]=[]; self.punish[k]=0; self.bias[k]=1.0
-        self.eps_greedy = self.eps_greedy_base
-        self.step=0; self.cur_str='random'; self.prev_state=None
-        self.prev_action=self.idx2str.index(self.cur_str)
-        self.snap_prev=self._snap(); self.count[self.cur_str]+=1
-        for s in self.strats.values(): s.start()
+    def attack(self):
+        return self.strategies[self.current].attack()
 
-    def initial_placement(self,e,r): return self.strats[self.cur_str].initial_placement(e,r)
-    def attack(self):               return self.strats[self.cur_str].attack()
-    def freemove(self):             return self.strats[self.cur_str].freemove()
+    def freemove(self):
+        return self.strategies[self.current].freemove()
 
-    def reinforce(self, troops):
-        if self.step % self.seg_len==0 and self.step>0:
-            snap_now=self._snap(); rew=self._reward(self.snap_prev,snap_now)
-            self.mem['s'].append(self.prev_state); self.mem['a'].append(self.prev_action)
-            self.mem['lp'].append(self.prev_lp); self.mem['r'].append(rew)
-            self.mem['d'].append(0); self.rew[self.cur_str].append(rew)
-            self._adjust_bias(self.cur_str, rew)
-            st=self._feat(); a,lp=self._choose(st)
-            self.cur_str=self.idx2str[a]; self.prev_state, self.prev_action, self.prev_lp = st,a,lp
-            self.snap_prev=snap_now; self.count[self.cur_str]+=1
+    def reinforce(self, troops: int) -> List:
+        if self.step and self.step % self.config.seg_len == 0:
+            curr_snap = self._snapshot()
+            rew = self._compute_reward(self.snapshot_prev, curr_snap)
+            self.memory['state'].append(self.prev_state)
+            self.memory['action'].append(self.prev_action)
+            self.memory['logprob'].append(self.prev_logprob)
+            self.memory['reward'].append(rew)
+            self.memory['done'].append(False)
+            self.returns[self.current].append(rew)
+            if rew < 0:
+                self.punish[self.current] += 1
+                self.bias[self.current] = max(0.2, self.bias[self.current] - 0.1)
+            else:
+                self.bias[self.current] = min(3.0, self.bias[self.current] + 0.1)
+            state, act = self._features(), None
+            act, logp = self._choose_action(state)
+            self.prev_state, self.prev_action, self.prev_logprob = state, act, logp
+            self.current = self.names[act]
+            self.usage[self.current] += 1
+            self.count[self.current] += 1
+            self.snapshot_prev = curr_snap
         if self.prev_state is None:
-            self.prev_state=self._feat(); self.prev_lp=torch.log(torch.tensor(1.0/len(self.idx2str)))
-        self.step+=1
-        return self.strats[self.cur_str].reinforce(troops)
+            self.prev_state = self._features()
+            self.prev_logprob = torch.log(torch.tensor(1/len(self.names), device=self.device))
+        self.step += 1
+        return self.strategies[self.current].reinforce(troops)
 
-    def end(self):
-        snap=self._snap(); rew=self._reward(self.snap_prev,snap)
-        self.mem['s'].append(self.prev_state); self.mem['a'].append(self.prev_action)
-        self.mem['lp'].append(self.prev_lp); self.mem['r'].append(rew); self.mem['d'].append(1)
-        self.rew[self.cur_str].append(rew)
-        if self.mem['s']: self._ppo()
-        self._save();
-        for s in self.strats.values(): s.end()
-        if self.snap_prev is None: self.snap_prev=self._snap()
+    def end(self) -> None:
+        curr_snap = self._snapshot()
+        rew = self._compute_reward(self.snapshot_prev, curr_snap)
+        self.memory['state'].append(self.prev_state)
+        self.memory['action'].append(self.prev_action)
+        self.memory['logprob'].append(self.prev_logprob)
+        self.memory['reward'].append(rew)
+        self.memory['done'].append(True)
+        self.returns[self.current].append(rew)
+        if self.memory['state']:
+            self._ppo_update()
+            self._save()
+        for strat in self.strategies.values(): strat.end()
         print("\n[Strategy Summary]")
-        for k in self.idx2str:
-            avg = np.mean(self.rew[k]) if self.rew[k] else 0.0
-            print(f"{k:>10}: used={self.count[k]:3d}  avg_rew={avg:+.2f}  bias={self.bias[k]:.2f}")
+        for n in self.names:
+            used = self.usage[n]
+            avg = float(np.mean(self.returns[n])) if self.returns[n] else 0.0
+            bias = self.bias[n]
+            print(f"{n:>10}: used={used:3d}  avg_rew={avg:+.2f}  bias={bias:.2f}")
+
+    def _compute_reward(self, prev: Dict[str,float], curr: Dict[str,float]) -> float:
+        r = (curr['terr'] - prev['terr']) * 0.5 + (curr['forces'] - prev['forces']) * 0.1
+        r += (curr['areas'] - prev['areas']) * 2.0
+        if not prev['alive'] and curr['alive']: r += 2.0
+        if prev['alive'] and not curr['alive']: r -= 5.0
+        return float(np.tanh(r / self.config.reward_scale))
