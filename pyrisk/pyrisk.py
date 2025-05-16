@@ -63,10 +63,10 @@ for p in args.players:
     filename = name[:-2].lower() + "_ai" if name.endswith("AI") else name.lower()
     count = int(match.group(2)[1:]) if match.group(2) else 1
     try:
-        klass = getattr(importlib.import_module("agents." + filename), name)
+        klass = getattr(importlib.import_module("AI." + filename), name)
         player_classes.extend([klass] * count)
     except Exception:
-        print(f"Unable to import AI {name} from agents/{filename}.py")
+        print(f"Unable to import AI {name} from AI/{filename}.py")
         raise
 
 # --------------------------------------------------------------------- #
