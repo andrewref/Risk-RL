@@ -12,10 +12,10 @@ from torch.distributions import Categorical
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
 
-from agents.aggressive_ai import AggressiveAI
-from agents.balanced_ai import BalancedAI
-from agents.defensive_ai import DefensiveAI
-from agents.random_ai import RandomAI
+from AI.aggressive_ai import AggressiveAI
+from AI.balanced_ai import BalancedAI
+from AI.defensive_ai import DefensiveAI
+from AI.random_ai import RandomAI
 
 LOG = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class PPOConfig:
     lr_critic: float = 1e-3
     clip_grad_norm: float = 0.5
     lr_schedule: bool = True
-    total_updates: int = 50000
+    total_updates: int = 5000
     model_path: str = "ppo_model_final.pt"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 

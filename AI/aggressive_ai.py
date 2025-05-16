@@ -12,7 +12,7 @@ AggressiveAI – expert attacker, mediocre everywhere else
 import random
 from collections import defaultdict
 from typing import List, Tuple, Dict
-from agents.balanced_ai import BalancedAI  # delegate non-attack phases
+from AI.balanced_ai import BalancedAI  # delegate non-attack phases
 
 class AggressiveAI:
     def __init__(self, player, game, world, **kwargs):

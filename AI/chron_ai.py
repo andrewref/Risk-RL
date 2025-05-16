@@ -1,4 +1,4 @@
-from ai import AI
+from AI.major import AI
 import random
 from collections import defaultdict
 from copy import deepcopy

@@ -18,11 +18,11 @@ from collections import defaultdict
 from typing import Optional
 
 from pyrisk.game import Game
-from agents.ppoagent import PPOAgent
-from agents.aggressive_ai import AggressiveAI
-from agents.balanced_ai import BalancedAI
-from agents.defensive_ai import DefensiveAI
-from agents.random_ai import RandomAI
+from ai.ppoagent import PPOAgent
+from ai.aggressive_ai import AggressiveAI
+from ai.balanced_ai import BalancedAI
+from ai.defensive_ai import DefensiveAI
+from ai.random_ai import RandomAI
 
 LOG = logging.getLogger("evaluate")
 
