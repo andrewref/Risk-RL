@@ -32,9 +32,9 @@ from AI.balanced_ai import BalancedAI
 from AI.defensive_ai import DefensiveAI
 from AI.random_ai import RandomAI
 from AI.better_ai import BetterAI
-
+from AI.stupid_ai import StupidAI
 LOG = logging.getLogger("train")
-AGENT_NAMES = ["PPO", "AggressiveAI", "BalancedAI", "DefensiveAI", "RandomAI", "BetterAI"]
+AGENT_NAMES = ["PPO", "AggressiveAI", "BalancedAI", "DefensiveAI", "RandomAI", "BetterAI", "1stAI"]
 
 TRACK_FILE = "ppo_training_progress.json"
 MODEL_FILE = "ppo_model_final.pt"
@@ -79,8 +79,8 @@ def plot_history(history: list[dict]) -> None:
     plt.ylabel("Win Rate (%)")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("ppo_winrate_plot_final2.png")
-    LOG.info("Saved win rate plot as 'ppo_winrate_plot_final2.png'")
+    plt.savefig("ppo_winrate_plot_final3.png")
+    LOG.info("Saved win rate plot as 'ppo_winrate_plot_final3.png'")
 
 
 def play_with_limits(game: Game, max_turns: int, factor: float = 0.06) -> str:
@@ -136,11 +136,12 @@ def train(num_games: int, max_turns: int, log_interval: int, seed: int, deal: bo
         for episode in range(1, num_games + 1):
             current_game = Game(curses=False, color=False, delay=0, wait=False, deal=deal)
             current_game.add_player("PPO", make_ppo)
-#            current_game.add_player("AggressiveAI", AggressiveAI)
-#            current_game.add_player("BalancedAI", BalancedAI)
- #           current_game.add_player("DefensiveAI", DefensiveAI)
+    #        current_game.add_player("AggressiveAI", AggressiveAI)
+    #        current_game.add_player("BalancedAI", BalancedAI)
+   #         current_game.add_player("DefensiveAI", DefensiveAI)
   #          current_game.add_player("RandomAI", RandomAI)
             current_game.add_player("BetterAI", BetterAI)
+   #         current_game.add_player("1stAI", StupidAI)
             winner = play_with_limits(current_game, max_turns)
             wins[winner] += 1
 
@@ -196,7 +197,7 @@ def train(num_games: int, max_turns: int, log_interval: int, seed: int, deal: bo
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train PPO meta-agent with turn cap")
-    parser.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
+    parser.add_argument("--episodes", type=int, default=200, help="Number of training episodes")
     parser.add_argument("--max_turns", type=int, default=250, help="Turn cap per game (now 250)")  # <-- updated
     parser.add_argument("--log_interval", type=int, default=10, help="Log every N games")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (-1 to skip)")
