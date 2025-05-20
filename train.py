@@ -197,7 +197,7 @@ def train(num_games: int, max_turns: int, log_interval: int, seed: int, deal: bo
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train PPO meta-agent with turn cap")
-    parser.add_argument("--episodes", type=int, default=200, help="Number of training episodes")
+    parser.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
     parser.add_argument("--max_turns", type=int, default=250, help="Turn cap per game (now 250)")  # <-- updated
     parser.add_argument("--log_interval", type=int, default=10, help="Log every N games")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (-1 to skip)")
