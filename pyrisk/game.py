@@ -157,7 +157,9 @@ class Game(object):
                         tt.forces += count
                         self.event(("move", self.player, st, tt, count), territory=[st, tt], player=[self.player.name])
                 live_players = len([p for p in self.players.values() if p.alive])
-            self.turn += 1
+                if hasattr(self, "frame_callback"):
+                  self.frame_callback(self)
+                self.turn += 1
         winner = [p for p in self.players.values() if p.alive][0]
         self.event(("victory", winner), player=[self.player.name])
         for p in self.players.values():

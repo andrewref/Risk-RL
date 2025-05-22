@@ -11,12 +11,22 @@ from torch import Tensor
 from torch.distributions import Categorical
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import LambdaLR
-
+import pickle
 from AI.aggressive_ai import AggressiveAI
 from AI.balanced_ai import BalancedAI
 from AI.defensive_ai import DefensiveAI
 from AI.random_ai import RandomAI
+from pathlib import Path
+import pickle, json
+from datetime import datetime
+# …
+RUN_ID      = datetime.now().strftime("%Y%m%d-%H%M%S")
+TRACE_DIR   = Path("traces")
+TRACE_DIR.mkdir(exist_ok=True)
 
+PROB_FILE   = TRACE_DIR / f"strategy_probs_{RUN_ID}.pkl"
+REWARD_FILE = TRACE_DIR / f"reward_trace_{RUN_ID}.json"
+SWITCH_FILE = TRACE_DIR / f"strategy_switch_{RUN_ID}.json"
 LOG = logging.getLogger(__name__)
 
 @dataclass
@@ -94,7 +104,8 @@ class PPOAgent:
         self.critic  = CriticNet(obs_dim).to(self.device)
         self.opt_actor  = optim.Adam(self.actor.parameters(), lr=config.lr_actor, eps=1e-5)
         self.opt_critic = optim.Adam(self.critic.parameters(), lr=config.lr_critic, eps=1e-5)
-
+        self.prob_trace    : list[tuple[int, list[float]]] = []   # (step, probs)
+        self.reward_trace  : list[dict] = []                     # reward breakdown
         # LR schedulers
         if config.lr_schedule:
             lr_lambda = lambda step: max(1 - step / config.total_updates, 0.1)  # Don't go to zero
@@ -256,25 +267,50 @@ class PPOAgent:
             torch.tensor(returns, device=self.device, dtype=torch.float32)
         )
 
+        # ------------------------------------------------------------------ #
+    #  Pick a meta-strategy + log probs                                  #
+    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------------- #
+#  PPOAgent helper: choose an action                                          #
+# --------------------------------------------------------------------------- #
     def _choose_action(self, state: Tensor) -> Tuple[int, Tensor, float]:
-        """Choose action with epsilon-greedy strategy and return value estimate"""
-        # Get value estimate
+        """
+        Sample a strategy index.
+
+        Returns
+        -------
+        act      : int     chosen strategy id
+        logp     : Tensor  log-probability of that action
+        value    : float   V(s) from critic
+        """
+        # ── 1) critic value (no grad) ──────────────────────────────────────────
         with torch.no_grad():
             value = self.critic(state).item()
-            
-        # Epsilon-greedy action selection
-        if np.random.rand() < self.eps:
-            act = np.random.randint(len(self.names))
-            logp = torch.log(torch.tensor(1.0/len(self.names), device=self.device))
-        else:
-            with torch.no_grad():
-                logits = self.actor(state)
-                probs = torch.softmax(logits, dim=-1)
-                dist = Categorical(probs)
-                act = dist.sample().item()
-                logp = dist.log_prob(torch.tensor(act, device=self.device))
-                
+
+        # ── 2) actor logits & softmax probabilities (no grad) ─────────────────
+        with torch.no_grad():
+            logits = self.actor(state)                     # shape: [n_strats]
+            probs_t = torch.softmax(logits, dim=-1)        # tensor on device
+            probs_np = probs_t.detach().cpu().numpy().tolist()
+
+        # ── 3) ε-greedy action -------------------------------------------------
+        if np.random.rand() < self.eps:                    # explore
+            act  = np.random.randint(len(self.names))
+            logp = torch.log(torch.tensor(1.0 / len(self.names),
+                                        device=self.device))
+        else:                                              # exploit / sample
+            dist = Categorical(probs_t)
+            act  = dist.sample().item()
+            logp = dist.log_prob(torch.tensor(act, device=self.device))
+
+        # ── 4) log probability vector every step ------------------------------
+        if not hasattr(self, "prob_trace"):
+            self.prob_trace = []                           # list[(step, [p0…])]
+        self.prob_trace.append((self.step, probs_np))
+
         return act, logp, value
+
+
 
     def _ppo_update(self) -> None:
         """Improved PPO update with value normalization and proper clipping"""
@@ -422,6 +458,8 @@ class PPOAgent:
             self.prev_logprob = logp
             self.prev_value = val
             self.current = self.names[act]
+        
+
             self.switch_log.append((self.step, self.current))
             # Track strategy usage
             self.count[self.current] += 1
@@ -444,35 +482,63 @@ class PPOAgent:
         self.step += 1
         return self.strategies[self.current].reinforce(troops)
 
+      # --------------------------------------------------------------------- #
+    #  End of episode                                                      #
+    # --------------------------------------------------------------------- #
+        # ------------------------------------------------------------------ #
+    #  Finish an episode                                                 #
+    # ------------------------------------------------------------------ #
     def end(self) -> None:
-        """End of episode processing"""
-        # Get final game state
+        """Finish episode: add final transition, update PPO, dump traces."""
+        # ── 1) final snapshot & reward ───────────────────────────────────
         curr_snap = self._snapshot()
-        
-        # Calculate final reward
-        rew = self._compute_reward(self.snapshot_prev, curr_snap)
-        
-        # Add final transition to memory
-        if self.prev_state is not None:
-            self.memory['state'].append(self.prev_state)
-            self.memory['action'].append(self.prev_action)
-            self.memory['logprob'].append(self.prev_logprob)
-            self.memory['reward'].append(rew)
-            self.memory['done'].append(True)
-            self.memory['value'].append(self.prev_value)
-        
-        # Update policy if we have transitions
-        if self.memory['state']:
+        rew       = self._compute_reward(self.snapshot_prev, curr_snap)
+
+        if self.prev_state is not None:      # push last transition
+            self.memory["state"  ].append(self.prev_state)
+            self.memory["action" ].append(self.prev_action)
+            self.memory["logprob"].append(self.prev_logprob)
+            self.memory["reward" ].append(rew)
+            self.memory["done"   ].append(True)
+            self.memory["value"  ].append(self.prev_value)
+
+        # ── 2) PPO update & checkpoint ──────────────────────────────────
+        if self.memory["state"]:
             self._ppo_update()
             self._save()
-        
-        # End sub-strategies
+
+        # ── 3) call end() on every sub-strategy ─────────────────────────
         for strat in self.strategies.values():
             strat.end()
-        if self.trace_frames and curr_snap['alive'] and curr_snap['enemies'] == 0:
-          with open(f"traces/game_{self.player.game_id}.json", "w") as f:
-                json.dump(self.trace_frames, f)
-    
+
+        # Ensure traces folder exists
+        Path("traces").mkdir(exist_ok=True)
+
+        # ── 4) board trace only if we actually won (optional) ───────────
+        if self.trace_frames and curr_snap["alive"] and curr_snap["enemies"] == 0:
+            if hasattr(self.player, "game_id"):
+                with open(f"traces/game_{self.player.game_id}.json", "w") as f:
+                    json.dump(self.trace_frames, f, indent=2)
+            self.trace_frames.clear()
+
+        if self.prob_trace:
+            mode = "ab" if PROB_FILE.exists() else "wb"
+            with open(PROB_FILE, mode) as f:
+                pickle.dump(self.prob_trace, f)
+            self.prob_trace.clear()
+
+        # ── 6) dump per-step reward-component trace (overwrite .json) ────────
+        if self.reward_trace:
+            with open(REWARD_FILE, "w") as f:
+                json.dump(self.reward_trace, f, indent=2)
+            self.reward_trace.clear()
+
+        # ── 7) dump strategy-switch timeline (overwrite .json) ───────────────
+        if self.switch_log:
+            with open(SWITCH_FILE, "w") as f:
+                json.dump(self.switch_log, f, indent=2)
+            self.switch_log.clear()
+
     def _compute_reward(self, prev: Dict[str, float], curr: Dict[str, float]) -> float:
         """Enhanced reward function that better captures progress and game dynamics"""
         # Territory and force changes
@@ -515,7 +581,19 @@ class PPOAgent:
         # Victory reward (if we're the only player alive)
         if curr['enemies'] == 0 and curr['alive']:
             r += 20.0  # Big reward for winning
-            
+        if not hasattr(self, "reward_trace"):
+            self.reward_trace = []
+
+        self.reward_trace.append({
+          "step": self.step,
+          "territory": terr_change * 0.5,
+          "forces": force_change * 0.1,
+          "areas": area_change * 2.0,
+          "enemy_kills": enemy_change * 3.0,
+          "border_bonus": 0.5 if terr_change > 0 and border_change < 0 else 0.0,
+          "death": -10.0 if prev['alive'] and not curr['alive'] else 0.0,
+          "win": 20.0 if curr['enemies'] == 0 and curr['alive'] else 0.0
+            })    
         return float(r)  # Return as float (fixes the incomplete line in original code)
     def episode_summary(self) -> dict:
         return {
@@ -523,3 +601,4 @@ class PPOAgent:
             "counts"   : self.count.copy(),
             "switches" : self.switch_log.copy(),
         }
+    
