@@ -2,7 +2,7 @@ import os
 import logging
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
-
+import json 
 import numpy as np
 import torch
 import torch.nn as nn
@@ -75,7 +75,7 @@ class PPOAgent:
         self.config = config
         self.device = torch.device(config.device)
         LOG.info(f"Using device: {self.device}")
-
+        self.switch_log: list[tuple[int, str]] = []
         # Sub-strategies
         self.strategies: Dict[str, object] = {
             'aggressive': AggressiveAI(player, game, world),
@@ -373,10 +373,11 @@ class PPOAgent:
         self.prev_action = self.names.index(self.current)
         self.prev_value = 0
         self.snapshot_prev = self._snapshot()
-        
+        self.switch_log.clear()
         # Reset counter each episode
         self.count = {n: 0 for n in self.names}
-        
+        self.trace_frames = []
+
         # Initialize sub-strategies
         for strat in self.strategies.values():
             strat.start()
@@ -421,13 +422,14 @@ class PPOAgent:
             self.prev_logprob = logp
             self.prev_value = val
             self.current = self.names[act]
-            
+            self.switch_log.append((self.step, self.current))
             # Track strategy usage
             self.count[self.current] += 1
             
             # Update snapshot
             self.snapshot_prev = curr_snap
-            
+        if getattr(self, "trace_frames", None) is not None:
+            self.trace_frames.append(self._snapshot())   # log a light-weight dict each turn    
         # Initialize state if this is the first step
         if self.prev_state is None:
             self.prev_state = self._features()
@@ -436,6 +438,7 @@ class PPOAgent:
             self.prev_logprob = logp
             self.prev_value = val
             self.current = self.names[act]
+            self.switch_log.append((self.step, self.current))
             self.count[self.current] += 1
             
         self.step += 1
@@ -466,7 +469,10 @@ class PPOAgent:
         # End sub-strategies
         for strat in self.strategies.values():
             strat.end()
-            
+        if self.trace_frames and curr_snap['alive'] and curr_snap['enemies'] == 0:
+          with open(f"traces/game_{self.player.game_id}.json", "w") as f:
+                json.dump(self.trace_frames, f)
+    
     def _compute_reward(self, prev: Dict[str, float], curr: Dict[str, float]) -> float:
         """Enhanced reward function that better captures progress and game dynamics"""
         # Territory and force changes
@@ -511,3 +517,9 @@ class PPOAgent:
             r += 20.0  # Big reward for winning
             
         return float(r)  # Return as float (fixes the incomplete line in original code)
+    def episode_summary(self) -> dict:
+        return {
+            "reward"   : self.episode_rewards[-1] if self.episode_rewards else 0.0,
+            "counts"   : self.count.copy(),
+            "switches" : self.switch_log.copy(),
+        }

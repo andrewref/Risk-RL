@@ -174,5 +174,25 @@
   {
     "episodes": 500,
     "win_rate": 44.2
+  },
+  {
+    "episodes": 30,
+    "win_rate": 33.33333333333333
+  },
+  {
+    "episodes": 1,
+    "win_rate": 0.0
+  },
+  {
+    "episodes": 1,
+    "win_rate": 100.0
+  },
+  {
+    "episodes": 1,
+    "win_rate": 0.0
+  },
+  {
+    "episodes": 1,
+    "win_rate": 0.0
   }
 ]
