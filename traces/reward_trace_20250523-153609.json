@@ -1,0 +1,32 @@
+[
+  {
+    "step": 3,
+    "territory": 6.5,
+    "forces": 2.3000000000000003,
+    "areas": 0.0,
+    "enemy_kills": -3.0,
+    "border_bonus": 0.0,
+    "death": 0.0,
+    "win": 0.0
+  },
+  {
+    "step": 6,
+    "territory": -3.0,
+    "forces": 0.0,
+    "areas": 0.0,
+    "enemy_kills": 0.0,
+    "border_bonus": 0.0,
+    "death": 0.0,
+    "win": 0.0
+  },
+  {
+    "step": 9,
+    "territory": -3.5,
+    "forces": -2.3000000000000003,
+    "areas": 0.0,
+    "enemy_kills": 0.0,
+    "border_bonus": 0.0,
+    "death": -10.0,
+    "win": 0.0
+  }
+]

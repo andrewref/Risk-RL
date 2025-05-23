@@ -424,13 +424,18 @@ class PPOAgent:
 
     def attack(self):
         """Delegate attack to current strategy"""
+        self._log_probs()
         return self.strategies[self.current].attack()
 
     def freemove(self):
         """Delegate freemove to current strategy"""
+        self._log_probs()
         return self.strategies[self.current].freemove()
 
     def reinforce(self, troops: int):
+        # this logs every step, even if strategy wasn't switched
+        
+
         """Handle reinforcement phase and strategy selection"""
         if self.step and self.step % self.config.seg_len == 0:
             # Get current game state
@@ -480,6 +485,11 @@ class PPOAgent:
             self.count[self.current] += 1
             
         self.step += 1
+        state = self._features()
+        logits = self.actor(state)
+        probs_t = torch.softmax(logits, dim=-1)
+        probs_np = probs_t.detach().cpu().numpy().tolist()
+        self.prob_trace.append((self.step, probs_np))
         return self.strategies[self.current].reinforce(troops)
 
       # --------------------------------------------------------------------- #
@@ -601,4 +611,12 @@ class PPOAgent:
             "counts"   : self.count.copy(),
             "switches" : self.switch_log.copy(),
         }
+    def _log_probs(self):
+        self.step += 1
+        state = self._features()
+        logits = self.actor(state)
+        probs_t = torch.softmax(logits, dim=-1)
+        probs_np = probs_t.detach().cpu().numpy().tolist()
+        self.prob_trace.append((self.step, probs_np))
+
     
