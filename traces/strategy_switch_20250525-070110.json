@@ -1,0 +1,30 @@
+[
+  [
+    0,
+    "balanced"
+  ],
+  [
+    3,
+    "balanced"
+  ],
+  [
+    6,
+    "aggressive"
+  ],
+  [
+    9,
+    "defensive"
+  ],
+  [
+    12,
+    "random"
+  ],
+  [
+    15,
+    "aggressive"
+  ],
+  [
+    18,
+    "defensive"
+  ]
+]

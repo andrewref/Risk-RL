@@ -19,9 +19,12 @@ import matplotlib.pyplot as plt
 from pyrisk.game import Game
 from AI.ppoagent import PPOAgent, PPOConfig
 from AI.better_ai import BetterAI        # keep the baseline you currently use
-
+from AI.first_ai import FirstAI   
+from AI.aggressive_ai import AggressiveAI 
+from AI.defensive_ai import DefensiveAI  
+from AI.random_ai import RandomAI    # keep the baseline you currently use
 LOG = logging.getLogger("train")
-AGENT_NAMES = ["PPO", "BetterAI"]
+AGENT_NAMES = ["PPO", "BetterAI", "FirstAI",    "AggressiveAI", "DefensiveAI", "RandomAI"]
 
 # ──────────────────────────────
 #  Logging helpers
@@ -128,8 +131,7 @@ def train(num_games: int, max_turns: int, log_int: int, seed: int, deal: bool) -
         for ep in range(1, num_games + 1):
             current_game = Game(curses=False, color=False, delay=0, wait=False, deal=deal)
             current_game.add_player("PPO", make_ppo)
-            current_game.add_player("BetterAI", BetterAI)
-
+            current_game.add_player("aggressive", AggressiveAI)
             winner = play_with_limits(current_game, max_turns)
             wins[winner] += 1
 
@@ -182,7 +184,7 @@ def train(num_games: int, max_turns: int, log_int: int, seed: int, deal: bool) -
 # ──────────────────────────────
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Train PPO meta-agent with logging")
-    p.add_argument("--episodes",   type=int, default=1)
+    p.add_argument("--episodes",   type=int, default=100)
     p.add_argument("--max_turns",  type=int, default=250)
     p.add_argument("--log_interval", type=int, default=10)
     p.add_argument("--seed",       type=int, default=42)

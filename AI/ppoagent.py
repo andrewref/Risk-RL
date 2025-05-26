@@ -35,9 +35,10 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     eps_clip: float = 0.2
-    eps_start: float = 0.2
-    eps_end: float = 0.01  # Increased from 0.0 to maintain some exploration
-    eps_decay: float = 0.995
+    eps_start = 0.2
+    eps_decay = 0.95
+    eps_end   = 0.01
+
     k_epochs: int = 4
     entropy_coef: float = 0.02  # Increased for better exploration
     lr_actor: float = 3e-4
@@ -383,7 +384,9 @@ class PPOAgent:
         if self.config.lr_schedule:
             self.sched_actor.step()
             self.sched_critic.step()
-            
+        prev_eps = self.eps
+        self.eps = max(self.eps * self.config.eps_decay, self.config.eps_end)
+        LOG.info(f"[Decay] Epsilon updated: {prev_eps:.5f} → {self.eps:.5f}")   
         # Decay exploration rate
         self.eps = max(self.eps * self.config.eps_decay, self.config.eps_end)
         
