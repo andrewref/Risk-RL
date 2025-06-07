@@ -35,9 +35,9 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     eps_clip: float = 0.2
-    eps_start = 0.2
-    eps_decay = 0.95
-    eps_end   = 0.01
+    eps_start = 0.0
+    eps_decay = 0.0
+    eps_end   = 0.00
 
     k_epochs: int = 4
     entropy_coef: float = 0.02  # Increased for better exploration
@@ -131,7 +131,11 @@ class PPOAgent:
 
         # Load checkpoint if available
         self._load()
+        # in PPOAgent.__init__
+        self.critic_trace = []   # predicted V(s)
+        self.return_trace = []   # actual returns
 
+       
     def event(self, msg):
         for strat in self.strategies.values():
             if hasattr(strat, 'event'):
@@ -364,7 +368,10 @@ class PPOAgent:
                 # Critic loss
                 new_values = self.critic(b_states)
                 critic_loss = 0.5 * ((new_values - b_ret) ** 2).mean()
-                
+                 # inside _ppo_update, *once* after you compute `new_values` and `b_ret`
+                self.critic_trace.extend(new_values.detach().cpu().numpy())
+                self.return_trace.extend(b_ret.detach().cpu().numpy())
+
                 # Entropy bonus (to encourage exploration)
                 entropy_loss = -self.config.entropy_coef * dist.entropy().mean()
                 
@@ -488,11 +495,6 @@ class PPOAgent:
             self.count[self.current] += 1
             
         self.step += 1
-        state = self._features()
-        logits = self.actor(state)
-        probs_t = torch.softmax(logits, dim=-1)
-        probs_np = probs_t.detach().cpu().numpy().tolist()
-        self.prob_trace.append((self.step, probs_np))
         return self.strategies[self.current].reinforce(troops)
 
       # --------------------------------------------------------------------- #
