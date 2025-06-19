@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 import matplotlib.pyplot as plt
-import numpy as np                    # ← NEW (for plotting arrays)
+import numpy as np
 
 from pyrisk.game import Game
 from AI.ppoagent import PPOAgent, PPOConfig
@@ -26,23 +26,16 @@ from AI.defensive_ai  import DefensiveAI
 from AI.random_ai     import RandomAI
 
 LOG = logging.getLogger("train")
-AGENT_NAMES = ["PPO", "BetterAI", "FirstAI",
-               "AggressiveAI", "DefensiveAI", "RandomAI"]
+AGENT_NAMES = ["TrainedPPO", "UntrainedPPO"]
 
-# ──────────────────────────────
-#  Extra diagnostics (pickle+png)
-# ──────────────────────────────
 RESULT_DIR = Path("results")
 RESULT_DIR.mkdir(exist_ok=True)
 
 CRITIC_PKL  = RESULT_DIR / "critic_trace.pkl"
-ACTOR_PKL   = Path("traces") / "strategy_probs_*.pkl"  # already emitted by PPOAgent
+ACTOR_PKL   = Path("traces") / "strategy_probs_*.pkl"
 CRITIC_PNG  = RESULT_DIR / "critic_performance.png"
 ACTOR_PNG   = RESULT_DIR / "actor_strategy_probs.png"
 
-# ──────────────────────────────
-#  CSV-logging (unchanged)
-# ──────────────────────────────
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -53,7 +46,6 @@ SWITCH_CSV  = LOG_DIR / "strategy_switches.csv"
 TRACK_FILE  = "ppo_training_progress.json"
 MODEL_FILE  = "ppo_model_final.pt"
 
-# initialise CSV files once
 if not REWARD_CSV.exists():
     REWARD_CSV.write_text("episode,reward\n")
 if not COUNT_CSV.exists():
@@ -61,9 +53,6 @@ if not COUNT_CSV.exists():
 if not SWITCH_CSV.exists():
     SWITCH_CSV.write_text("episode,step,strategy\n")
 
-# ──────────────────────────────
-#  History helpers (unchanged)
-# ──────────────────────────────
 def load_history() -> List[Dict]:
     if os.path.exists(TRACK_FILE):
         with open(TRACK_FILE, "r") as f:
@@ -91,11 +80,7 @@ def plot_history(history: List[Dict]) -> None:
     plt.savefig("ppo_winrate_plot_final3.png")
     LOG.info("Saved win-rate plot -> ppo_winrate_plot_final3.png")
 
-# ──────────────────────────────
-#  Game helpers
-# ──────────────────────────────
 def play_with_limits(game: Game, max_turns: int, factor: float = 0.06) -> str:
-    """Run a game with a turn cap *and* wall-clock timeout."""
     timeout_s = max_turns * factor
     result: Dict[str, Optional[str]] = {"winner": None}
     def _runner():
@@ -104,18 +89,12 @@ def play_with_limits(game: Game, max_turns: int, factor: float = 0.06) -> str:
             result["winner"] = game.play(max_turns=max_turns) if "max_turns" in sig.parameters else game.play()
     th = threading.Thread(target=_runner, daemon=True)
     th.start(); th.join(timeout_s)
-    if th.is_alive():                                   # timeout -> choose winner by troops
+    if th.is_alive():
         LOG.warning("Timeout (%.1fs). Selecting leader by troop count.", timeout_s)
         alive = [p for p in game.players.values() if p.alive]
         return max(alive, key=lambda p: (p.forces, p.territory_count)).name if alive else "Draw"
     return result["winner"] or "Draw"
 
-def make_ppo(player, game, world):
-    return PPOAgent(player, game, world, config=PPOConfig(model_path=MODEL_FILE))
-
-# ──────────────────────────────
-#  Training loop
-# ──────────────────────────────
 def train(num_games: int, max_turns: int, log_int: int, seed: int, deal: bool) -> None:
     if seed != -1:
         random.seed(seed)
@@ -124,7 +103,6 @@ def train(num_games: int, max_turns: int, log_int: int, seed: int, deal: bool) -
     history = load_history()
     previous_rate = history[-1]["win_rate"] if history else None
 
-    # --- NEW lists for critic diagnostics ---
     critic_log:  list[float] = []
     return_log:  list[float] = []
 
@@ -132,62 +110,51 @@ def train(num_games: int, max_turns: int, log_int: int, seed: int, deal: bool) -
     try:
         for ep in range(1, num_games + 1):
             current_game = Game(curses=False, color=False, delay=0, wait=False, deal=deal)
-            current_game.add_player("PPO", make_ppo)
-            current_game.add_player("aggressive", AggressiveAI)
+            current_game.add_player("TrainedPPO", lambda p, g, w: PPOAgent(p, g, w, config=PPOConfig(model_path=MODEL_FILE), use_trained=True))
+            current_game.add_player("UntrainedPPO", lambda p, g, w: PPOAgent(p, g, w, config=PPOConfig(model_path=MODEL_FILE), use_trained=False))
+
             winner = play_with_limits(current_game, max_turns)
             wins[winner] += 1
 
-            # ── grab PPO episode summary ────────────────────────────────
-            ppo_ai: PPOAgent = current_game.players["PPO"].ai  # type: ignore
-            reward        = ppo_ai.episode_rewards[-1] if ppo_ai.episode_rewards else 0.0
-            strat_counts  = ppo_ai.count
-            switch_events = ppo_ai.switch_log
+            for name in ["TrainedPPO", "UntrainedPPO"]:
+                ppo_ai: PPOAgent = current_game.players[name].ai
+                reward = ppo_ai.episode_rewards[-1] if ppo_ai.episode_rewards else 0.0
+                strat_counts = ppo_ai.count
+                switch_events = ppo_ai.switch_log
 
-            # 1️⃣ reward CSV
-            with REWARD_CSV.open("a") as f:
-                f.write(f"{ep},{reward:.3f}\n")
-            # 2️⃣ strategy count CSV
-            with COUNT_CSV.open("a") as f:
-                f.write(f"{ep},{strat_counts['aggressive']},{strat_counts['defensive']},"
-                        f"{strat_counts['balanced']},{strat_counts['random']}\n")
-            # 3️⃣ switch timing CSV
-            if switch_events:
-                with SWITCH_CSV.open("a") as f:
-                    for step, strat in switch_events:
-                        f.write(f"{ep},{step},{strat}\n")
+                with REWARD_CSV.open("a") as f:
+                    f.write(f"{ep},{reward:.3f}\n")
+                with COUNT_CSV.open("a") as f:
+                    f.write(f"{ep},{strat_counts['aggressive']},{strat_counts['defensive']},{strat_counts['balanced']},{strat_counts['random']}\n")
+                if switch_events:
+                    with SWITCH_CSV.open("a") as f:
+                        for step, strat in switch_events:
+                            f.write(f"{ep},{step},{strat}\n")
 
-            # --- NEW: collect critic traces for plotting later ----------
-            #  (You must add `critic_trace` and `return_trace` lists in PPOAgent)
-            critic_log.extend(ppo_ai.critic_trace)
-            return_log.extend(ppo_ai.return_trace)
+                critic_log.extend(ppo_ai.critic_trace)
+                return_log.extend(ppo_ai.return_trace)
 
-            # periodic console log
             if ep % log_int == 0 or ep == num_games:
-                ppo_rate = wins["PPO"] / ep * 100
-                delta    = ppo_rate - previous_rate if previous_rate is not None else 0.0
-                LOG.info("[EP %d] PPO win-rate: %.2f%%  (Δ %.2f)", ep, ppo_rate, delta)
+                trained_rate = wins["TrainedPPO"] / ep * 100
+                untrained_rate = wins["UntrainedPPO"] / ep * 100
+                LOG.info("[EP %d] TrainedPPO win-rate: %.2f%% | UntrainedPPO win-rate: %.2f%%", ep, trained_rate, untrained_rate)
 
     except KeyboardInterrupt:
-        LOG.warning("Interrupted!  Saving PPO model.")
+        LOG.warning("Interrupted! Saving PPO models.")
         if current_game:
-            current_game.players["PPO"].ai.end()        # flush + save
+            for name in ["TrainedPPO", "UntrainedPPO"]:
+                current_game.players[name].ai.end()
         return
 
-    # ── summary & history tracking ──────────────────────────────────────
-    total_rate = wins["PPO"] / num_games * 100
-    history.append({"episodes": num_games, "win_rate": total_rate})
+    history.append({"episodes": num_games, "win_rate": wins["TrainedPPO"] / num_games * 100})
     save_history(history); plot_history(history)
-    LOG.info("Finished %d games. Final PPO win-rate %.2f%%", num_games, total_rate)
+    LOG.info("Finished %d games. Final TrainedPPO win-rate %.2f%%", num_games, wins["TrainedPPO"] / num_games * 100)
 
-    # ────────────────────────────────────────────────────────────────────
-    #  NEW ▸ Dump critic trace + make both diagnostic plots
-    # ────────────────────────────────────────────────────────────────────
     if critic_log and return_log:
         with CRITIC_PKL.open("wb") as f:
             import pickle
             pickle.dump({"pred": critic_log, "ret": return_log}, f)
 
-        # critic plot
         plt.figure(figsize=(9, 4))
         plt.plot(return_log, label="Actual Returns")
         plt.plot(critic_log, label="Critic Predictions", alpha=.7)
@@ -198,11 +165,9 @@ def train(num_games: int, max_turns: int, log_int: int, seed: int, deal: bool) -
         plt.savefig(CRITIC_PNG)
         LOG.info("Saved critic plot -> %s", CRITIC_PNG)
 
-    # actor plot (soft-max) – collected automatically by PPOAgent into traces/…
     import glob, pickle
     pkl_files = sorted(glob.glob(str(ACTOR_PKL)))
     if pkl_files:
-        # merge all trace files into one array
         probs_all = []
         for path in pkl_files:
             with open(path, "rb") as f:
@@ -212,7 +177,7 @@ def train(num_games: int, max_turns: int, log_int: int, seed: int, deal: bool) -
                     except EOFError:
                         break
         if probs_all:
-            probs_np = np.array([p[1] for p in probs_all])  # ignore step index
+            probs_np = np.array([p[1] for p in probs_all])
             labels = ["Aggressive", "Defensive", "Balanced", "Random"]
             plt.figure(figsize=(9, 4))
             for i in range(4):
@@ -224,12 +189,13 @@ def train(num_games: int, max_turns: int, log_int: int, seed: int, deal: bool) -
             plt.savefig(ACTOR_PNG)
             LOG.info("Saved actor probability plot -> %s", ACTOR_PNG)
 
-# ──────────────────────────────
-#  Entry-point
-# ──────────────────────────────
+            print(f"\nOutcome of {num_games} games:")
+            for agent in sorted(AGENT_NAMES, key=lambda x: wins[x], reverse=True):
+                print(f"{agent: <15}: {wins[agent]} wins")
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Train PPO meta-agent with logging & diagnostics")
-    p.add_argument("--episodes",     type=int, default=1)
+    p.add_argument("--episodes",     type=int, default=100)
     p.add_argument("--max_turns",    type=int, default=250)
     p.add_argument("--log_interval", type=int, default=10)
     p.add_argument("--seed",         type=int, default=42)

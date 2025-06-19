@@ -47,9 +47,16 @@ class CursesDisplay(Display):
         self.sy, self.sx = self.screen.getmaxyx()    
         curses.noecho()
         if self.color:
-            for i in range(1, 8):
-                curses.init_pair(i, i, curses.COLOR_BLACK)
-        
+            # Use visually distinct colors
+            curses.init_pair(1, curses.COLOR_RED,     curses.COLOR_BLACK)
+            curses.init_pair(2, curses.COLOR_GREEN,   curses.COLOR_BLACK)
+            curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
+            curses.init_pair(4, curses.COLOR_CYAN,    curses.COLOR_BLACK)
+            curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+            curses.init_pair(6, curses.COLOR_BLUE,    curses.COLOR_BLACK)
+            curses.init_pair(7, curses.COLOR_WHITE,   curses.COLOR_BLACK)
+
+                
         self.worldpad = curses.newpad(self.wy, self.wx)
         self.infopad = curses.newpad(self.iy, self.ix)    
 

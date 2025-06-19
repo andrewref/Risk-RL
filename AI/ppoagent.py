@@ -81,7 +81,7 @@ class CriticNet(nn.Module):
         return self.net(x).squeeze(-1)
 
 class PPOAgent:
-    def __init__(self, player, game, world, config: PPOConfig = PPOConfig()):
+    def __init__(self, player, game, world,use_trained=True, config: PPOConfig = PPOConfig()):
         self.player, self.game, self.world = player, game, world
         self.config = config
         self.device = torch.device(config.device)
@@ -95,6 +95,11 @@ class PPOAgent:
             'random':    RandomAI(player, game, world)
         }
         self.names = list(self.strategies.keys())
+        if use_trained:
+            print(f"[PPOAgent INIT] -> Loading trained model from {self.config.model_path}")
+            self._load()
+        else:
+            print("[PPOAgent INIT] -> Starting with untrained (random) weights")
 
         # Counter for how many times each strategy is chosen
         self.count = {n: 0 for n in self.names}
@@ -130,7 +135,11 @@ class PPOAgent:
         self.eps = config.eps_start
 
         # Load checkpoint if available
-        self._load()
+        if use_trained:
+            print(f"[PPOAgent INIT] -> Loading trained model from {self.config.model_path}")
+            self._load()
+        else:
+            print("[PPOAgent INIT] -> Starting with untrained (random) weights")
         # in PPOAgent.__init__
         self.critic_trace = []   # predicted V(s)
         self.return_trace = []   # actual returns

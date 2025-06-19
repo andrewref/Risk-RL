@@ -39,8 +39,6 @@ parser.add_argument("--deal", action="store_true", default=False,
 
 args = parser.parse_args()
 
-NAMES = ["ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT"]
-
 LOG.setLevel(logging.DEBUG)
 if args.log:
     logging.basicConfig(filename="pyrisk.log", filemode="w")
@@ -54,17 +52,37 @@ if args.seed is not None:
 #  Load AI classes                                                      #
 # --------------------------------------------------------------------- #
 player_classes = []
-name_to_class = {}  # Map player name (e.g., "ALPHA") to class name (e.g., "PPOAgent")
+name_to_class = {}  # Map player name to class name (e.g., TrainedPPO -> PPOAgent)
+
 for p in args.players:
     match = re.match(r"(\w+)?(\*\d+)?", p)
     if not match:
         continue
     name = match.group(1)
-    filename = name[:-2].lower() + "_ai" if name.endswith("AI") else name.lower()
     count = int(match.group(2)[1:]) if match.group(2) else 1
+
+    manual_map = {
+        "TrainedPPO": ("ppoagent", "PPOAgent", True),
+        "UntrainedPPO": ("ppoagent", "PPOAgent", False),
+    }
+
+    if name in manual_map:
+        filename, class_name, is_trained = manual_map[name]
+    else:
+        filename = name[:-2].lower() + "_ai" if name.endswith("AI") else name.lower()
+        class_name = name
+        is_trained = None
+
     try:
-        klass = getattr(importlib.import_module("AI." + filename), name)
-        player_classes.extend([klass] * count)
+        klass = getattr(importlib.import_module("AI." + filename), class_name)
+
+        if is_trained is not None:
+            for _ in range(count):
+                player_classes.append((name, klass, is_trained))
+        else:
+            for _ in range(count):
+                player_classes.append((name, klass, None))
+
     except Exception:
         print(f"Unable to import AI {name} from AI/{filename}.py")
         raise
@@ -86,10 +104,14 @@ kwargs = dict(
 
 def wrapper(stdscr, **kwargs):
     g = Game(screen=stdscr, **kwargs)
-    for i, klass in enumerate(player_classes):
-        name = NAMES[i]
-        g.add_player(name, klass)
-        name_to_class[name] = klass.__name__
+    for name, klass, trained_flag in player_classes:
+        if trained_flag is not None:
+            agent = klass(name, g, g.world, use_trained=trained_flag)
+        else:
+            agent = klass(name, g, g.world)
+        g.add_player(name, agent.__class__)
+        name_to_class[name] = agent.__class__.__name__
+
     return g.play()
 
 # Single game or multiple rounds
@@ -99,7 +121,7 @@ if args.games == 1:
     else:
         winner = wrapper(None, **kwargs)
     winner_class = name_to_class.get(winner, winner)
-    print(f"\n🏆 The winner is: {winner_class}")
+    print(f"\n\U0001F3C6 The winner is: {winner_class}")
 else:
     wins = collections.defaultdict(int)
     for j in range(args.games):

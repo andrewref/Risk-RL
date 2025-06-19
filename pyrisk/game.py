@@ -88,7 +88,11 @@ class Game(object):
         live_players = len(self.players)
         self.initial_placement()
         
-        while live_players > 1:
+        while True:
+            live_players = len([p for p in self.players.values() if p.alive])
+            if live_players <= 1:
+                break
+
             if self.player.alive:
                 choices = self.player.ai.reinforce(self.player.reinforcements)
                 assert sum(choices.values()) == self.player.reinforcements
