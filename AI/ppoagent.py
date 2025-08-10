@@ -322,6 +322,9 @@ class PPOAgent:
             self.prob_trace = []                           # list[(step, [p0…])]
         self.prob_trace.append((self.step, probs_np))
 
+        if hasattr(self.game, "stats_collector") and self.game.stats_collector:
+            self.game.stats_collector.record_policy(self.player.name, self.step, probs_np, act, value)
+
         return act, logp, value
 
 
