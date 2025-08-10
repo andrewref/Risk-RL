@@ -617,7 +617,9 @@ class PPOAgent:
           "border_bonus": 0.5 if terr_change > 0 and border_change < 0 else 0.0,
           "death": -10.0 if prev['alive'] and not curr['alive'] else 0.0,
           "win": 20.0 if curr['enemies'] == 0 and curr['alive'] else 0.0
-            })    
+            })
+        if hasattr(self.game, "stats_collector") and self.game.stats_collector:
+            self.game.stats_collector.record_reward(self.player.name, r)
         return float(r)  # Return as float (fixes the incomplete line in original code)
     def episode_summary(self) -> dict:
         return {
