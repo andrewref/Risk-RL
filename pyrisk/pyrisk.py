@@ -7,6 +7,7 @@ import collections
 import curses
 import sys
 import os
+from datetime import datetime
 from pyrisk.game import Game
 from pyrisk.world import CONNECT, MAP, KEY, AREAS
 
@@ -47,6 +48,9 @@ elif not args.curses:
 
 if args.seed is not None:
     random.seed(args.seed)
+
+# Unique identifier for grouping game statistics
+RUN_ID = datetime.now().strftime("%Y%m%d-%H%M%S")
 
 # --------------------------------------------------------------------- #
 #  Load AI classes                                                      #
@@ -100,6 +104,7 @@ kwargs = dict(
     areas=AREAS,
     wait=args.wait,
     deal=args.deal,
+    run_id=RUN_ID,
 )
 
 def wrapper(stdscr, **kwargs):

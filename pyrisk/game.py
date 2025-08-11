@@ -38,8 +38,9 @@ class Game(object):
 
         self.turn = 0
         self.turn_order = []
-        self.run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         round_opt = self.options.get("round")
+        # Allow callers to supply a run_id so multiple games in one run share a folder
+        self.run_id = self.options.get("run_id") or datetime.now().strftime("%Y%m%d-%H%M%S")
         self.game_id = f"game_{round_opt[0]}" if isinstance(round_opt, tuple) else "game"
         self.stats_collector = StatsCollector(self, self.run_id)
 
