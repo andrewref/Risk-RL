@@ -97,12 +97,6 @@ class PPOAgent:
             'random':    RandomAI(player, game, world)
         }
         self.names = list(self.strategies.keys())
-        if use_trained:
-            print(f"[PPOAgent INIT] -> Loading trained model from {self.config.model_path}")
-            self._load()
-        else:
-            print("[PPOAgent INIT] -> Starting with untrained (random) weights")
-
         # Counter for how many times each strategy is chosen
         self.count = {n: 0 for n in self.names}
 
