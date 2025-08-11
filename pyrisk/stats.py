@@ -14,6 +14,7 @@ class StatsCollector:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.turn = 0
         self.data: Dict[str, Dict[str, list]] = {}
+        # Track attack outcomes and army casualties
         self.attacks: Dict[str, Dict[str, int]] = {}
         self.cum_rewards: Dict[str, float] = {}
         self.has_reward = False
@@ -27,16 +28,25 @@ class StatsCollector:
         if not msg:
             return
         tag = msg[0]
-        if tag == "conquer":
+        if tag in {"conquer", "defeat"}:
             atk = msg[1].name
             dfn = msg[2].name
-            self.attacks.setdefault(atk, {"won": 0, "lost": 0})["won"] += 1
-            self.attacks.setdefault(dfn, {"won": 0, "lost": 0})["lost"] += 1
-        elif tag == "defeat":
-            atk = msg[1].name
-            dfn = msg[2].name
-            self.attacks.setdefault(atk, {"won": 0, "lost": 0})["lost"] += 1
-            self.attacks.setdefault(dfn, {"won": 0, "lost": 0})["won"] += 1
+            initial_atk, initial_def = msg[5]
+            final_atk, final_def = msg[6]
+            atk_losses = initial_atk - final_atk
+            def_losses = initial_def - final_def
+            self.attacks.setdefault(atk, {"won": 0, "lost": 0, "kills": 0, "losses": 0})
+            self.attacks.setdefault(dfn, {"won": 0, "lost": 0, "kills": 0, "losses": 0})
+            if tag == "conquer":
+                self.attacks[atk]["won"] += 1
+                self.attacks[dfn]["lost"] += 1
+            else:
+                self.attacks[atk]["lost"] += 1
+                self.attacks[dfn]["won"] += 1
+            self.attacks[atk]["kills"] += def_losses
+            self.attacks[atk]["losses"] += atk_losses
+            self.attacks[dfn]["kills"] += atk_losses
+            self.attacks[dfn]["losses"] += def_losses
 
     # ------------------------------------------------------------------
     def record_reward(self, player_name: str, reward: float) -> None:
@@ -75,7 +85,7 @@ class StatsCollector:
             stats["territories"].append(p.territory_count)
             stats["armies"].append(p.forces)
             stats["continents"].append(sum(1 for _ in p.areas))
-            atk = self.attacks.get(name, {"won": 0, "lost": 0})
+            atk = self.attacks.get(name, {"won": 0, "lost": 0, "kills": 0, "losses": 0})
             stats["attacks_won"].append(atk["won"])
             stats["attacks_lost"].append(atk["lost"])
             stats["reward"].append(self.cum_rewards.get(name, 0.0))
