@@ -1,10 +1,12 @@
 from pyrisk.display import Display, CursesDisplay
-from pyrisk.player   import Player     
+from pyrisk.player   import Player
 from pyrisk.territory import World
 from pyrisk.world import CONNECT, AREAS, MAP, KEY
+from pyrisk.stats import StatsCollector
 import logging
 LOG = logging.getLogger("pyrisk")
 import random
+from datetime import datetime
 
 
 class Game(object):
@@ -36,6 +38,11 @@ class Game(object):
 
         self.turn = 0
         self.turn_order = []
+        round_opt = self.options.get("round")
+        # Allow callers to supply a run_id so multiple games in one run share a folder
+        self.run_id = self.options.get("run_id") or datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.game_id = f"game_{round_opt[0]}" if isinstance(round_opt, tuple) else "game"
+        self.stats_collector = StatsCollector(self, self.run_id)
 
         if self.options['curses']:
             self.display = CursesDisplay(self.options['screen'], self,
@@ -71,10 +78,12 @@ class Game(object):
         """
         
         self.display.update(msg, territory=territory, player=player)
-        
+
         LOG.info([str(m) for m in msg])
         for p in self.players.values():
             p.ai.event(msg)
+        if self.stats_collector:
+            self.stats_collector.record_event(msg)
         
     def play(self):
         assert 2 <= len(self.players) <= 5
@@ -85,9 +94,10 @@ class Game(object):
             self.players[name].ord = ord('\/-|+*'[i])
             self.players[name].ai.start()
         self.event(("start", ))
-        live_players = len(self.players)
         self.initial_placement()
-        
+        if self.stats_collector:
+            self.stats_collector.record_turn()
+
         while True:
             live_players = len([p for p in self.players.values() if p.alive])
             if live_players <= 1:
@@ -110,7 +120,7 @@ class Game(object):
                         continue
                     t.forces += f
                     self.event(("reinforce", self.player, t, f), territory=[t], player=[self.player.name])
-                
+
                 for src, target, attack, move in self.player.ai.attack():
                     st = self.world.territory(src)
                     tt = self.world.territory(target)
@@ -160,12 +170,14 @@ class Game(object):
                         st.forces -= count
                         tt.forces += count
                         self.event(("move", self.player, st, tt, count), territory=[st, tt], player=[self.player.name])
-                live_players = len([p for p in self.players.values() if p.alive])
-                if hasattr(self, "frame_callback"):
-                  self.frame_callback(self)
-                self.turn += 1
+            if self.stats_collector:
+                self.stats_collector.record_turn()
+            self.turn += 1
+
         winner = [p for p in self.players.values() if p.alive][0]
         self.event(("victory", winner), player=[self.player.name])
+        if self.stats_collector:
+            self.stats_collector.finalize()
         for p in self.players.values():
             p.ai.end()
         return winner.name

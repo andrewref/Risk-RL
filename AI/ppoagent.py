@@ -1,6 +1,6 @@
 import os
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 import json 
 import numpy as np
@@ -19,6 +19,7 @@ from AI.random_ai import RandomAI
 from pathlib import Path
 import pickle, json
 from datetime import datetime
+from pyrisk.rl.reward import RewardWeights, compute_reward
 # …
 RUN_ID      = datetime.now().strftime("%Y%m%d-%H%M%S")
 TRACE_DIR   = Path("traces")
@@ -48,6 +49,7 @@ class PPOConfig:
     total_updates: int = 5000
     model_path: str = "ppo_model_final.pt"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    reward_weights: RewardWeights = field(default_factory=RewardWeights)
 
 class ActorNet(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, hid: int = 64) -> None:
@@ -95,12 +97,6 @@ class PPOAgent:
             'random':    RandomAI(player, game, world)
         }
         self.names = list(self.strategies.keys())
-        if use_trained:
-            print(f"[PPOAgent INIT] -> Loading trained model from {self.config.model_path}")
-            self._load()
-        else:
-            print("[PPOAgent INIT] -> Starting with untrained (random) weights")
-
         # Counter for how many times each strategy is chosen
         self.count = {n: 0 for n in self.names}
 
@@ -245,7 +241,12 @@ class PPOAgent:
                     if nb.owner and nb.owner != p:
                         border_territories += 1
                         break
-        
+        atk_stats = {}
+        if getattr(self.game, "stats_collector", None):
+            atk_stats = self.game.stats_collector.attacks.get(
+                self.player.name, {"kills": 0, "losses": 0}
+            )
+
         return {
             'terr': p.territory_count,
             'forces': p.forces,
@@ -255,6 +256,8 @@ class PPOAgent:
             'enemies': len(enemies),
             'enemy_terr': sum(e.territory_count for e in enemies) if enemies else 0,
             'enemy_forces': sum(e.forces for e in enemies) if enemies else 0,
+            'kills': atk_stats.get('kills', 0),
+            'losses': atk_stats.get('losses', 0),
         }
 
     def _gae(self, rewards: List[float], dones: List[int], values: List[float]) -> Tuple[Tensor, Tensor]:
@@ -321,6 +324,9 @@ class PPOAgent:
         if not hasattr(self, "prob_trace"):
             self.prob_trace = []                           # list[(step, [p0…])]
         self.prob_trace.append((self.step, probs_np))
+
+        if hasattr(self.game, "stats_collector") and self.game.stats_collector:
+            self.game.stats_collector.record_policy(self.player.name, self.step, probs_np, act, value)
 
         return act, logp, value
 
@@ -564,61 +570,32 @@ class PPOAgent:
             self.switch_log.clear()
 
     def _compute_reward(self, prev: Dict[str, float], curr: Dict[str, float]) -> float:
-        """Enhanced reward function that better captures progress and game dynamics"""
-        # Territory and force changes
-        terr_change = curr['terr'] - prev['terr']
-        force_change = curr['forces'] - prev['forces']
-        area_change = curr['areas'] - prev['areas']
-        
-        # Base reward
-        r = (
-            terr_change * 0.5 +             # Territory gain reward
-            force_change * 0.1 +           # Force gain reward
-            area_change * 2.0              # Area control reward
-        )
-        
-        # Win/lose conditions with stronger penalties/rewards
-        if not prev['alive'] and curr['alive']:  # Resurrection (shouldn't happen)
-            r += 5.0
-        if prev['alive'] and not curr['alive']:  # Death
-            r -= 10.0
-        
-        # Enemy elimination bonus
-        enemy_change = prev['enemies'] - curr['enemies']
-        if enemy_change > 0:
-            r += enemy_change * 3.0  # Big reward for eliminating enemies
-            
-        # Border territory control (strategic positioning)
-        border_change = curr['border_terr'] - prev['border_terr']
-        if terr_change > 0 and border_change < 0:
-            # Bonus for consolidating territories (reducing border exposure)
-            r += 0.5
-            
-        # Relative strength improvement
-        if prev['enemy_forces'] > 0 and curr['enemy_forces'] > 0:
-            prev_strength_ratio = prev['forces'] / prev['enemy_forces']
-            curr_strength_ratio = curr['forces'] / curr['enemy_forces']
-            
-            if curr_strength_ratio > prev_strength_ratio:
-                r += 0.3  # Reward for improving relative strength
-        
-        # Victory reward (if we're the only player alive)
-        if curr['enemies'] == 0 and curr['alive']:
-            r += 20.0  # Big reward for winning
-        if not hasattr(self, "reward_trace"):
-            self.reward_trace = []
+        prev_state = {
+            "territories": {self.player.name: prev["terr"]},
+            "continents": {self.player.name: prev["areas"]},
+        }
+        curr_state = {
+            "territories": {self.player.name: curr["terr"]},
+            "continents": {self.player.name: curr["areas"]},
+        }
+        events = {
+            "kills": {self.player.name: curr.get("kills", 0) - prev.get("kills", 0)},
+            "losses": {self.player.name: curr.get("losses", 0) - prev.get("losses", 0)},
+            "is_terminal": not curr["alive"] or curr["enemies"] == 0,
+        }
+        if curr["enemies"] == 0 and curr["alive"]:
+            events["won_game_for"] = self.player.name
+        elif prev["alive"] and not curr["alive"]:
+            events["lost_players"] = [self.player.name]
 
-        self.reward_trace.append({
-          "step": self.step,
-          "territory": terr_change * 0.5,
-          "forces": force_change * 0.1,
-          "areas": area_change * 2.0,
-          "enemy_kills": enemy_change * 3.0,
-          "border_bonus": 0.5 if terr_change > 0 and border_change < 0 else 0.0,
-          "death": -10.0 if prev['alive'] and not curr['alive'] else 0.0,
-          "win": 20.0 if curr['enemies'] == 0 and curr['alive'] else 0.0
-            })    
-        return float(r)  # Return as float (fixes the incomplete line in original code)
+        reward, comps = compute_reward(
+            prev_state, curr_state, events, self.player.name, self.config.reward_weights
+        )
+
+        self.reward_trace.append({"step": self.step, **comps})
+        if self.game.stats_collector:
+            self.game.stats_collector.record_reward(self.player.name, reward)
+        return reward
     def episode_summary(self) -> dict:
         return {
             "reward"   : self.episode_rewards[-1] if self.episode_rewards else 0.0,
